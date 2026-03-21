@@ -1,0 +1,14 @@
+# Before installing requirements, upgrade build tools for Windows:
+# C:\WINDOWS\system32\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+
+# Compatible versions for Python 3.13
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+requests==2.32.3
+faiss-cpu==1.9.0
+sentence-transformers==3.3.1
+pydantic==2.10.3
+python-dotenv==1.0.1
+typer[all]==0.15.1
+rich==13.9.4
+numpy==2.2.1
