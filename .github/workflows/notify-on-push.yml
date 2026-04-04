@@ -1,0 +1,30 @@
+name: Email Notification on Push
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send email notification
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "New push to ${{ github.repository }} by ${{ github.actor }}"
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_USERNAME }}
+          body: |
+            A new push was made to ${{ github.repository }}.
+
+            Branch: ${{ github.ref_name }}
+            Pushed by: ${{ github.actor }}
+            Commit: ${{ github.sha }}
+            Message: ${{ github.event.head_commit.message }}
+
+            View changes: https://github.com/${{ github.repository }}/commit/${{ github.sha }}
