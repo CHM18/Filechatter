@@ -1,21 +1,21 @@
-"""RAG Server for Filechatter - Integrates with LM Studio"""
+"""RAG server for Filechatter with persistent chunked retrieval."""
+from typing import Any
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import faiss
-import numpy as np
 import requests
 import logging
-from pathlib import Path
-from sentence_transformers import SentenceTransformer
+
 import config
+from rag_store import RagStore, SearchResult
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
-app = FastAPI(title="Filechatter RAG Server", version="1.0.0")
+app = FastAPI(title="Filechatter RAG Server", version="2.0.0")
 
 # Add CORS middleware
 app.add_middleware(
@@ -26,20 +26,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize FAISS and sentence transformer
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-dimension = 384  # all-MiniLM-L6-v2 produces 384-dimensional embeddings
-index = faiss.IndexFlatL2(dimension)  # L2 distance for similarity search
-
-# Store documents and their embeddings
-documents = []
-doc_ids = []
-id_counter = 0
+store = RagStore()
 
 # Configuration
 LM_STUDIO_BASE_URL = config.LM_STUDIO_BASE_URL
 LM_STUDIO_MODEL = config.LM_STUDIO_MODEL
-CONTEXT_SIZE = config.CONTEXT_SIZE
+
+
 class QueryRequest(BaseModel):
     question: str
     include_context: bool = True
@@ -47,13 +40,53 @@ class QueryRequest(BaseModel):
 
 class DocumentUpload(BaseModel):
     documents: list[str]
-    metadata: list[dict] = None
+    metadata: list[dict[str, Any]] | None = None
+
+
+class RetrievedChunk(BaseModel):
+    chunk_id: int
+    source: str
+    content: str
+    metadata: dict[str, Any]
+    score: float
+    rank: int
 
 
 class ChatResponse(BaseModel):
     question: str
     answer: str
-    context: list[str] = []
+    context: list[RetrievedChunk] = []
+
+
+class SearchResponse(BaseModel):
+    question: str
+    results: list[RetrievedChunk]
+
+
+def _serialize_result(result: SearchResult) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=result.chunk_id,
+        source=result.source,
+        content=result.content,
+        metadata=result.metadata,
+        score=result.score,
+        rank=result.rank,
+    )
+
+
+def _format_context(results: list[SearchResult]) -> str:
+    blocks = []
+    for result in results:
+        blocks.append(
+            "\n".join(
+                [
+                    f"Source: {result.source}",
+                    f"Chunk: {result.metadata.get('chunk_index', result.rank)}",
+                    result.content,
+                ]
+            )
+        )
+    return "\n\n---\n\n".join(blocks)
 
 
 @app.get("/health")
@@ -72,35 +105,40 @@ async def health_check():
     return {
         "status": "ok",
         "lm_studio_connected": lm_studio_ok,
-        "documents_count": len(documents)
+        "documents_count": len(store.list_sources()),
+        "chunks_count": store.chunk_count,
+        "data_dir": config.DATA_DIR,
     }
+
+
+@app.post("/search", response_model=SearchResponse)
+async def search(request: QueryRequest):
+    """Retrieve relevant chunks without invoking the LLM."""
+    results = store.search(request.question) if request.include_context else []
+    return SearchResponse(
+        question=request.question,
+        results=[_serialize_result(result) for result in results],
+    )
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: QueryRequest):
-    """Chat endpoint with RAG - queries documents and LM Studio"""
+    """Compatibility chat endpoint using chunked retrieval plus LM Studio."""
     try:
-        context = ""
-        context_docs = []
-        
-        # Retrieve relevant documents if there are any
-        if len(documents) > 0 and request.include_context:
-            # Encode the query
-            query_embedding = embedding_model.encode([request.question])
-            
-            # Search for similar documents
-            k = min(CONTEXT_SIZE, len(documents))
-            distances, indices = index.search(query_embedding.astype(np.float32), k)
-            
-            # Get the retrieved documents
-            context_docs = [documents[i] for i in indices[0]]
-            context = "\n---\n".join(context_docs)
-        
+        search_results = store.search(request.question) if request.include_context else []
+        context = _format_context(search_results)
+
         # Prepare messages for LM Studio
-        system_message = "You are a helpful assistant."
+        system_message = (
+            "You are a helpful assistant. Answer from the retrieved context when it is relevant. "
+            "If the context is insufficient, say that directly instead of inventing details."
+        )
         if context:
-            system_message += f"\n\nUse the following context to answer the question:\n{context}"
-        
+            system_message += (
+                "\n\nUse the following retrieved context. Cite the source name when you rely on it:\n"
+                f"{context}"
+            )
+
         # Call LM Studio API
         response = requests.post(
             f"{LM_STUDIO_BASE_URL}/v1/chat/completions",
@@ -110,7 +148,7 @@ async def chat(request: QueryRequest):
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": request.question}
                 ],
-                "temperature": 0.7,
+                "temperature": config.TEMPERATURE,
                 "top_p": 0.9,
             },
             timeout=config.LM_STUDIO_TIMEOUT
@@ -127,9 +165,9 @@ async def chat(request: QueryRequest):
         return ChatResponse(
             question=request.question,
             answer=answer,
-            context=context_docs
+            context=[_serialize_result(result) for result in search_results]
         )
-    
+
     except requests.exceptions.ConnectionError:
         raise HTTPException(
             status_code=503,
@@ -142,32 +180,19 @@ async def chat(request: QueryRequest):
 
 @app.post("/upload")
 async def upload_documents(request: DocumentUpload):
-    """Upload documents to vector database"""
-    global id_counter
-    
+    """Upload documents to the persistent chunked store."""
     try:
         if not request.documents:
             raise HTTPException(status_code=400, detail="No documents provided")
-        
-        # Generate embeddings for the documents
-        embeddings = embedding_model.encode(request.documents)
-        
-        # Add to FAISS index
-        index.add(embeddings.astype(np.float32))
-        
-        # Store documents and IDs
-        for doc in request.documents:
-            documents.append(doc)
-            doc_ids.append(f"doc_{id_counter}")
-            id_counter += 1
-        
-        logger.info(f"Uploaded {len(request.documents)} documents")
-        return {
-            "status": "success",
-            "documents_uploaded": len(request.documents),
-            "total_documents": len(documents)
-        }
-    
+
+        result = store.add_documents(request.documents, request.metadata)
+        logger.info(
+            "Uploaded %s documents as %s chunks",
+            result["documents_uploaded"],
+            result["chunks_uploaded"],
+        )
+        return {"status": "success", **result}
+
     except Exception as e:
         logger.error(f"Upload error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -175,11 +200,35 @@ async def upload_documents(request: DocumentUpload):
 
 @app.get("/documents")
 async def list_documents():
-    """List all documents in the database"""
+    """List indexed sources and storage summary."""
     try:
         return {
-            "total_documents": len(documents),
-            "collection_name": "faiss_index"
+            "total_documents": len(store.list_sources()),
+            "total_chunks": store.chunk_count,
+            "collection_name": "faiss_sqlite_store",
+            "sources": store.list_sources(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chunks")
+async def list_chunks(
+    source: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+):
+    """List stored chunks for debugging indexed content."""
+    try:
+        safe_limit = max(1, min(limit, 200))
+        safe_offset = max(0, offset)
+        chunks = store.get_chunks(source=source, limit=safe_limit, offset=safe_offset)
+        return {
+            "source": source,
+            "count": len(chunks),
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "chunks": chunks,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -188,23 +237,23 @@ async def list_documents():
 @app.delete("/documents")
 async def clear_documents():
     """Clear all documents from the database"""
-    global documents, doc_ids, id_counter
-    
     try:
-        # Clear FAISS index and document lists
-        index.reset()
-        documents.clear()
-        doc_ids.clear()
-        id_counter = 0
-        
+        store.clear()
         logger.info("Database cleared")
         return {
             "status": "success",
             "message": "All documents cleared"
         }
+
     except Exception as e:
         logger.error(f"Clear error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close local resources on server shutdown."""
+    store.close()
 
 
 if __name__ == "__main__":
