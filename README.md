@@ -291,3 +291,8 @@ See LICENSE file for details.
 ## Contributing
 
 Contributions welcome! Feel free to submit issues and pull requests.
+
+## To Do
+- One-click-script to start venv and rag_server
+- make it more robust: when many files are uploaded only some hits are returned for a key-word, not all
+- include description of images into text (so that the LLM can better understand the context), especially images embedded in pdf and docx files
