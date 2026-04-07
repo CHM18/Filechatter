@@ -41,6 +41,12 @@ source venv/bin/activate
 
 3. Install dependencies:
 ```bash
+# On Windows
+winget install Rustlang.Rustup
+# On macOS/Linux
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# On Windows and macOS/Linux:
 pip install -r requirements.txt
 ```
 
@@ -48,7 +54,7 @@ pip install -r requirements.txt
 
 ```bash
 # On Windows
-venv\Scripts\python.exe rag_server.py
+venv\Spcripts\python.exe rag_server.py
 # On macOS/Linux
 python rag_server.py
 ```
