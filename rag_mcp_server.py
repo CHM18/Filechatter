@@ -11,17 +11,31 @@ from uuid import uuid4
 
 from mcp.server.fastmcp import FastMCP
 
-from document_loader import discover_documents, load_document
+from document_loader import discover_documents, get_document_support_status, load_document
 from rag_store import RagStore
+
+
+def _build_instructions() -> str:
+    instructions = (
+        "Use these tools to search a local document index and manage indexed sources. "
+        "Prefer search_documents for grounded retrieval before answering questions. "
+        "For large folders, prefer start_ingest_directory and then poll get_ingest_status instead of using the synchronous ingest_directory tool."
+    )
+
+    unavailable = [
+        f"{extension}: {details['message']}"
+        for extension, details in get_document_support_status().items()
+        if not details["available"]
+    ]
+    if unavailable:
+        instructions += " Reader readiness check: some formats are currently unavailable. " + " ".join(unavailable)
+
+    return instructions
 
 
 mcp = FastMCP(
     "Filechatter",
-    instructions=(
-        "Use these tools to search a local document index and manage indexed sources. "
-        "Prefer search_documents for grounded retrieval before answering questions. "
-        "For large folders, prefer start_ingest_directory and then poll get_ingest_status instead of using the synchronous ingest_directory tool."
-    ),
+    instructions=_build_instructions(),
     json_response=True,
 )
 
@@ -167,6 +181,23 @@ def list_sources() -> dict[str, Any]:
         "total_documents": len(store.list_sources()),
         "total_chunks": store.chunk_count,
         "sources": store.list_sources(),
+    }
+
+
+@mcp.tool()
+def get_document_support() -> dict[str, Any]:
+    """Report which document formats are currently ingest-ready and which optional dependencies are missing."""
+    support = get_document_support_status()
+    unavailable = {
+        extension: details
+        for extension, details in support.items()
+        if not details["available"]
+    }
+    return {
+        "supported_extensions": sorted(support.keys()),
+        "formats": support,
+        "all_formats_ready": not unavailable,
+        "unavailable_formats": unavailable,
     }
 
 

@@ -53,9 +53,7 @@ pip install -r requirements.txt
 ### Running the Server
 
 ```bash
-# On Windows
-venv\Spcripts\python.exe rag_server.py
-# On macOS/Linux
+# On Windows and macOS/Linux:
 python rag_server.py
 ```
 
@@ -93,11 +91,14 @@ After that, LM Studio can use these tools during chat:
 
 - `search_documents`
 - `list_sources`
+- `get_document_support`
 - `ingest_file`
 - `ingest_directory`
 - `start_ingest_directory`
 - `get_ingest_status`
 - `clear_index`
+
+If ingestion fails for a specific file type, call `get_document_support` first. It reports which formats are currently ingest-ready and which optional dependencies are missing.
 
 For small folders, `ingest_directory` is fine. For larger folders, prefer `start_ingest_directory` so LM Studio does not sit in one long-running tool call and time out.
 
@@ -284,6 +285,11 @@ Filechatter/
 - Ensure `rag_mcp_server.py` runs with the same virtual environment that has `mcp` installed
 - Check the program entry in LM Studio `mcp.json`
 - Restart LM Studio after editing `mcp.json`
+
+### PDF or DOCX ingestion reports a missing dependency
+- Call `get_document_support` in LM Studio to see reader readiness by file type
+- Reinstall dependencies with `pip install -r requirements.txt`
+- Restart the MCP server after installing new packages so it picks up the updated environment
 
 ### Some Word `.doc` files are skipped
 - `.docx` is read directly in Python

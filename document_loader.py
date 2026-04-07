@@ -1,14 +1,20 @@
 """Helpers for loading supported document types into plain text."""
 from __future__ import annotations
 
+import importlib.util
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {".txt", ".pdf", ".docx", ".doc"}
+
+
+def _has_module(module_name: str) -> bool:
+    return importlib.util.find_spec(module_name) is not None
 
 
 @dataclass(slots=True)
@@ -86,6 +92,38 @@ READERS = {
     ".docx": _read_docx,
     ".doc": _read_doc,
 }
+
+
+def get_document_support_status() -> dict[str, dict[str, Any]]:
+    support: dict[str, dict[str, Any]] = {
+        ".txt": {
+            "available": True,
+            "dependency": None,
+            "message": "Built-in text reader is available.",
+        },
+        ".pdf": {
+            "available": _has_module("pypdf"),
+            "dependency": "pypdf",
+            "message": "Requires the 'pypdf' package.",
+        },
+        ".docx": {
+            "available": _has_module("docx"),
+            "dependency": "python-docx",
+            "message": "Requires the 'python-docx' package.",
+        },
+        ".doc": {
+            "available": sys.platform.startswith("win") and _has_module("win32com"),
+            "dependency": "pywin32 + Microsoft Word",
+            "message": "Requires Windows, pywin32, and a local Microsoft Word installation.",
+        },
+    }
+
+    for extension, details in support.items():
+        if details["available"]:
+            details["status"] = "ready"
+        else:
+            details["status"] = "missing_dependency"
+    return support
 
 
 def is_supported_file(path: Path) -> bool:
