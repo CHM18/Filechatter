@@ -265,10 +265,10 @@ def start_ingest_directory(path: str, recursive: bool = True) -> dict[str, Any]:
 
 
 @mcp.tool()
-def get_ingest_status(job_id: str | None = None) -> dict[str, Any]:
+def get_ingest_status(job_id: str = "") -> dict[str, Any]:
     """Return the progress of a background ingest job. Omit job_id to inspect the active job."""
     with job_lock:
-        target_job_id = job_id or active_job_id
+        target_job_id = job_id if job_id else active_job_id
         if target_job_id is None:
             completed_jobs = sorted(
                 jobs.values(),
