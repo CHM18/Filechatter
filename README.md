@@ -32,9 +32,11 @@ cd Filechatter
 
 2. Create a virtual environment:
 ```bash
-python -m venv venv
+python -m venv filechatter
 # On Windows
-venv\Scripts\activate
+filechatter\Scripts\activate.ps1
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+& c:\Users\post\Desktop\Dateien_KI\Filechatter\venv\Scripts\Activate.ps1
 # On macOS/Linux
 source venv/bin/activate
 ```

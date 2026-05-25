@@ -4,3 +4,21 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+
+# Virtual environments
+venv/
+filechatter/
+
+# Local data and binary artifacts
+data/
+*.sqlite3
+*.faiss
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Build/dist
+dist/
+build/
+*.egg-info/
