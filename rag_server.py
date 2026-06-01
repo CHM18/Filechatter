@@ -3,12 +3,20 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import requests
 import logging
+from langchain.schema import Document
 
 import config
 from rag_store import RagStore, SearchResult
+from langchain_support import (
+    LMStudioChatClient,
+    RagRetriever,
+    build_prompt,
+    format_context,
+    parse_model_output,
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +35,13 @@ app.add_middleware(
 )
 
 store = RagStore()
+retriever = RagRetriever(store)
+lm_client = LMStudioChatClient(
+    base_url=config.LM_STUDIO_BASE_URL,
+    model=config.LM_STUDIO_MODEL,
+    temperature=config.TEMPERATURE,
+    timeout=config.LM_STUDIO_TIMEOUT,
+)
 
 # Configuration
 LM_STUDIO_BASE_URL = config.LM_STUDIO_BASE_URL
@@ -55,7 +70,16 @@ class RetrievedChunk(BaseModel):
 class ChatResponse(BaseModel):
     question: str
     answer: str
-    context: list[RetrievedChunk] = []
+    context: list[RetrievedChunk] = Field(default_factory=list)
+    sources: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ChatLangChainResponse(BaseModel):
+    question: str
+    prompt: str
+    answer: str
+    sources: list[dict[str, Any]] = Field(default_factory=list)
+    context: list[RetrievedChunk] = Field(default_factory=list)
 
 
 class SearchResponse(BaseModel):
@@ -75,18 +99,16 @@ def _serialize_result(result: SearchResult) -> RetrievedChunk:
 
 
 def _format_context(results: list[SearchResult]) -> str:
-    blocks = []
-    for result in results:
-        blocks.append(
-            "\n".join(
-                [
-                    f"Source: {result.source}",
-                    f"Chunk: {result.metadata.get('chunk_index', result.rank)}",
-                    result.content,
-                ]
-            )
-        )
-    return "\n\n---\n\n".join(blocks)
+    return format_context(
+        [
+            Document(page_content=result.content, metadata={
+                **result.metadata,
+                "source": result.source,
+                "chunk_index": result.metadata.get("chunk_index", result.rank),
+            })
+            for result in results
+        ]
+    )
 
 
 @app.get("/health")
@@ -125,47 +147,27 @@ async def search(request: QueryRequest):
 async def chat(request: QueryRequest):
     """Compatibility chat endpoint using chunked retrieval plus LM Studio."""
     try:
-        search_results = store.search(request.question) if request.include_context else []
-        context = _format_context(search_results)
+        retrieved_documents = retriever.get_relevant_documents(request.question) if request.include_context else []
+        context = format_context(retrieved_documents)
+        prompt_text = build_prompt(request.question, context)
 
-        # Prepare messages for LM Studio
-        system_message = (
-            "You are a helpful assistant. Answer from the retrieved context when it is relevant. "
-            "If the context is insufficient, say that directly instead of inventing details."
-        )
-        if context:
-            system_message += (
-                "\n\nUse the following retrieved context. Cite the source name when you rely on it:\n"
-                f"{context}"
-            )
+        answer_text = lm_client.request(prompt_text)
+        parsed = {}
+        try:
+            parsed = parse_model_output(answer_text)
+        except Exception as parse_exc:
+            logger.warning("Failed to parse LM Studio output, falling back to raw text: %s", parse_exc)
+            parsed = {"answer": answer_text.strip(), "sources": []}
 
-        # Call LM Studio API
-        response = requests.post(
-            f"{LM_STUDIO_BASE_URL}/v1/chat/completions",
-            json={
-                "model": LM_STUDIO_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": request.question}
-                ],
-                "temperature": config.TEMPERATURE,
-                "top_p": 0.9,
-            },
-            timeout=config.LM_STUDIO_TIMEOUT
-        )
-        
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=500,
-                detail=f"LM Studio error: {response.text}"
-            )
-        
-        answer = response.json()["choices"][0]["message"]["content"]
-        
+        chat_context = [
+            _serialize_result(result) for result in store.search(request.question)
+        ] if request.include_context else []
+
         return ChatResponse(
             question=request.question,
-            answer=answer,
-            context=[_serialize_result(result) for result in search_results]
+            answer=parsed.get("answer", answer_text).strip(),
+            sources=parsed.get("sources", []),
+            context=chat_context,
         )
 
     except requests.exceptions.ConnectionError:
@@ -175,6 +177,40 @@ async def chat(request: QueryRequest):
         )
     except Exception as e:
         logger.error(f"Chat error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat_langchain", response_model=ChatLangChainResponse)
+async def chat_langchain(request: QueryRequest):
+    """Chat endpoint that returns the prompt, structured sources, and grounded answer."""
+    try:
+        retrieved_documents = retriever.get_relevant_documents(request.question) if request.include_context else []
+        context = format_context(retrieved_documents)
+        prompt_text = build_prompt(request.question, context)
+
+        answer_text = lm_client.request(prompt_text)
+        parsed = {}
+        try:
+            parsed = parse_model_output(answer_text)
+        except Exception as parse_exc:
+            logger.warning("Failed to parse LM Studio output, falling back to raw text: %s", parse_exc)
+            parsed = {"answer": answer_text.strip(), "sources": []}
+
+        return ChatLangChainResponse(
+            question=request.question,
+            prompt=prompt_text,
+            answer=parsed.get("answer", answer_text).strip(),
+            sources=parsed.get("sources", []),
+            context=[_serialize_result(result) for result in store.search(request.question)] if request.include_context else [],
+        )
+
+    except requests.exceptions.ConnectionError:
+        raise HTTPException(
+            status_code=503,
+            detail="Cannot connect to LM Studio. Ensure it's running on " + LM_STUDIO_BASE_URL
+        )
+    except Exception as e:
+        logger.error(f"Chat langchain error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

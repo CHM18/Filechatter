@@ -12,6 +12,7 @@ Filechatter is a local RAG backend for LM Studio. It chunks large text files, st
 - 📁 **Flexible Document Upload** - Single files or entire directories, including subdirectories
 - 🖥️ **CLI Tool** - Handy for ingestion and diagnostics
 - 🔌 **RESTful API** - Upload, inspect, search, and compatibility chat endpoints
+- 🧠 **LangChain-backed chat** - Structured prompt template + output parser for grounded responses
 - 🔧 **MCP Server** - Lets LM Studio call the retriever directly from chat
 
 ## Quick Start

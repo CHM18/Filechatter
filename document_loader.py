@@ -137,9 +137,11 @@ def load_document(path: Path) -> LoadedDocument:
 
     reader = READERS[resolved_path.suffix.lower()]
     content = reader(resolved_path).strip()
+    # Use full path as source to avoid collisions with same-named files in different directories
     metadata = {
-        "source": resolved_path.name,
+        "source": str(resolved_path),
         "path": str(resolved_path),
+        "filename": resolved_path.name,
         "extension": resolved_path.suffix.lower(),
     }
     return LoadedDocument(path=resolved_path, content=content, metadata=metadata)

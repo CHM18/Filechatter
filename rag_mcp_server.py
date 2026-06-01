@@ -4,15 +4,26 @@ from __future__ import annotations
 import atexit
 from dataclasses import dataclass, field
 from pathlib import Path
+import logging
+import traceback
 import threading
 from time import time
 from typing import Any
 from uuid import uuid4
+import signal
+import sys
 
 from mcp.server.fastmcp import FastMCP
 
 from document_loader import discover_documents, get_document_support_status, load_document
 from rag_store import RagStore
+
+# Optional memory monitoring
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
 
 
 def _build_instructions() -> str:
@@ -42,6 +53,42 @@ mcp = FastMCP(
 store = RagStore()
 atexit.register(store.close)
 
+# Per-job ingest logs
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Global reference to active job log for signal handlers
+_active_log_path: Path | None = None
+_active_log_lock = threading.Lock()
+
+def _signal_handler(signum, frame):
+    """Handle termination signals and log them"""
+    global _active_log_path
+    with _active_log_lock:
+        if _active_log_path and _active_log_path.exists():
+            try:
+                with open(_active_log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"SIGNAL RECEIVED: {signal.Signals(signum).name} (code {signum}) at {time()}\n")
+                    fh.flush()
+            except Exception:
+                pass
+
+# Register signal handlers
+if hasattr(signal, 'SIGTERM'):
+    signal.signal(signal.SIGTERM, _signal_handler)
+if hasattr(signal, 'SIGINT'):
+    signal.signal(signal.SIGINT, _signal_handler)
+
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# MCP tool timeout safety: process files in time-boxed batches
+# LM Studio likely has 60-90s timeout on tool calls, so we stop at 45s to be safe
+MAX_PROCESSING_TIME_PER_BATCH = 45  # seconds
+
+def _job_log_path(job_id: str) -> Path:
+    return LOG_DIR / f"ingest-{job_id}.log"
+
 
 @dataclass(slots=True)
 class IngestJob:
@@ -61,6 +108,7 @@ class IngestJob:
     recent_errors: list[str] = field(default_factory=list)
     started_at: float = field(default_factory=time)
     finished_at: float | None = None
+    remaining_file_count: int = 0  # Files not yet processed (for resume)
 
 
 job_lock = threading.Lock()
@@ -87,6 +135,9 @@ def _job_snapshot(job: IngestJob) -> dict[str, Any]:
         "progress_percent": 100.0 if job.total_files == 0 else progress,
         "error": job.error,
         "recent_errors": job.recent_errors[-10:],
+        # Full tracebacks and errors for detailed debugging
+        "recent_errors_full": job.recent_errors,
+        "error_full": job.error,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
     }
@@ -98,44 +149,145 @@ def _set_active_job(job_id: str | None) -> None:
 
 
 def _run_ingest_job(job_id: str, paths: list[Path]) -> None:
+    global _active_log_path
+    
     job = jobs[job_id]
     with job_lock:
         job.status = "running"
 
+    log_path = _job_log_path(job_id)
+    
+    # Register this log file with signal handler
+    with _active_log_lock:
+        _active_log_path = log_path
+    
+    start_time = time()
+    
+    with open(log_path, "w", encoding="utf-8") as fh:
+        fh.write(f"JOB STARTED: {job_id} | {len(paths)} files to ingest | timestamp={start_time}\n")
+        fh.flush()
+    
     try:
-        for file_path in paths:
+        for idx, file_path in enumerate(paths):
+            # Check if we're running out of time (MCP timeout safety)
+            elapsed_total = time() - start_time
+            if elapsed_total > MAX_PROCESSING_TIME_PER_BATCH:
+                remaining_count = len(paths) - idx
+                with job_lock:
+                    job.remaining_file_count = remaining_count
+                    job.status = "paused"
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"[TIMEOUT] Batch time limit ({MAX_PROCESSING_TIME_PER_BATCH}s) reached after {elapsed_total:.1f}s\n")
+                    fh.write(f"[RESUME] {remaining_count} files remaining. Call start_ingest_directory() again to continue.\n")
+                    fh.flush()
+                break
+            
             with job_lock:
                 job.current_file = str(file_path)
+            
+            # Log progress checkpoint
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"[CHECKPOINT] File {idx+1}/{len(paths)} | elapsed={elapsed_total:.1f}s\n")
+                fh.flush()
+            
+            # Log memory usage periodically
+            if HAS_PSUTIL:
+                try:
+                    process = psutil.Process()
+                    mem_info = process.memory_info()
+                    with open(log_path, "a", encoding="utf-8") as fh:
+                        fh.write(f"[MEM] RSS: {mem_info.rss / 1024 / 1024:.1f}MB | Processing: {file_path.name}\n")
+                except Exception:
+                    pass
 
             try:
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"[LOAD_START] Loading: {file_path.name}\n")
+                    fh.flush()
+                
                 loaded_document = load_document(file_path)
+                
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"[LOAD_OK] Loaded {len(loaded_document.content)} chars\n")
+                    fh.flush()
+                
                 content = loaded_document.content
                 if not content.strip():
                     with job_lock:
                         job.skipped_files += 1
+                    with open(log_path, "a", encoding="utf-8") as fh:
+                        fh.write(f"SKIP: {file_path}\n")
                 else:
-                    result = store.add_documents([content], [loaded_document.metadata])
-                    with job_lock:
-                        job.succeeded_files += result["documents_uploaded"]
-                        job.documents_uploaded += result["documents_uploaded"]
-                        job.chunks_uploaded += result["chunks_uploaded"]
+                    try:
+                        file_start_time = time()
+                        result = store.add_documents([content], [loaded_document.metadata])
+                        elapsed = time() - file_start_time
+                        with job_lock:
+                            job.succeeded_files += result["documents_uploaded"]
+                            job.documents_uploaded += result["documents_uploaded"]
+                            job.chunks_uploaded += result["chunks_uploaded"]
+                        with open(log_path, "a", encoding="utf-8") as fh:
+                            fh.write(f"OK: {file_path} -> {result['documents_uploaded']} docs, {result['chunks_uploaded']} chunks ({elapsed:.2f}s)\n")
+                            fh.flush()
+                    except Exception as store_exc:
+                        tb = traceback.format_exc()
+                        err_msg = f"{file_path}: store.add_documents() failed: {store_exc}\n{tb}"
+                        with job_lock:
+                            job.failed_files += 1
+                            job.recent_errors.append(err_msg)
+                        with open(log_path, "a", encoding="utf-8") as fh:
+                            fh.write(f"ERROR (store): {err_msg}\n")
+                        # Try to recover by reloading the index
+                        try:
+                            store.reload()
+                            with open(log_path, "a", encoding="utf-8") as fh:
+                                fh.write(f"INFO: Reloaded store index after error\n")
+                        except Exception as reload_exc:
+                            with open(log_path, "a", encoding="utf-8") as fh:
+                                fh.write(f"ERROR: Failed to reload store: {reload_exc}\n")
             except Exception as exc:
+                tb = traceback.format_exc()
+                err_msg = f"{file_path}: {exc}\n{tb}"
                 with job_lock:
                     job.failed_files += 1
-                    job.recent_errors.append(f"{file_path}: {exc}")
-            finally:
-                with job_lock:
-                    job.processed_files += 1
-
+                    job.recent_errors.append(err_msg)
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"ERROR: {err_msg}\n")
+        
+        # Job completed or paused
+        elapsed_total = time() - start_time
         with job_lock:
-            job.status = "completed"
-            job.current_file = None
-            job.finished_at = time()
-            _set_active_job(None)
-    except Exception as exc:
+            if job.status != "paused":  # Only set to completed if not already paused due to timeout
+                job.status = "completed"
+        
+        if job.status == "completed":
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"JOB COMPLETED: {job_id} | Processed {job.succeeded_files} succeeded, {job.failed_files} failed, {job.skipped_files} skipped | elapsed={elapsed_total:.1f}s\n")
+        else:
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"JOB PAUSED: {job_id} | Progress: {job.succeeded_files} succeeded, {job.failed_files} failed, {job.skipped_files} skipped, {job.remaining_file_count} remaining | elapsed={elapsed_total:.1f}s\n")
+    
+    except Exception as job_exc:
+        tb = traceback.format_exc()
+        err_msg = f"Job {job_id} crashed: {job_exc}\n{tb}"
         with job_lock:
             job.status = "failed"
-            job.error = str(exc)
+            job.error = str(job_exc)
+            job.recent_errors.append(err_msg)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"JOB CRASHED: {err_msg}\n")
+    
+    finally:
+        # Always write a final heartbeat to detect if the thread is still running
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"JOB ENDED: {job_id} | final_status={job.status} | timestamp={time()}\n")
+            fh.flush()
+        
+        # Clear active log path
+        with _active_log_lock:
+            _active_log_path = None
+        
+        with job_lock:
             job.current_file = None
             job.finished_at = time()
             _set_active_job(None)
@@ -223,7 +375,10 @@ def ingest_directory(path: str, recursive: bool = True) -> dict[str, int]:
 
 @mcp.tool()
 def start_ingest_directory(path: str, recursive: bool = True) -> dict[str, Any]:
-    """Start indexing a large directory in the background and return a job id for progress polling."""
+    """Start indexing a large directory in the background and return a job id for progress polling.
+    
+    This tool uses batch processing to work around MCP timeout limits. If a job returns status "paused",
+    call this tool again to resume processing the remaining files."""
     dir_path = Path(path).expanduser().resolve()
     if not dir_path.is_dir():
         raise ValueError(f"Directory not found: {dir_path}")
@@ -232,9 +387,26 @@ def start_ingest_directory(path: str, recursive: bool = True) -> dict[str, Any]:
     job_id = str(uuid4())
 
     with job_lock:
+        # Check if we have an active paused job we can resume
         if active_job_id is not None:
             active_job = jobs.get(active_job_id)
-            if active_job and active_job.status in {"queued", "running"}:
+            if active_job and active_job.status == "paused":
+                # Resume the paused job with the same directory
+                active_job.status = "running"
+                active_job.remaining_file_count = 0
+                thread = threading.Thread(
+                    target=_run_ingest_job,
+                    args=(active_job_id, files),
+                    daemon=True,
+                    name=f"filechatter-ingest-{active_job_id[:8]}-resume",
+                )
+                thread.start()
+                return {
+                    "status": "resumed",
+                    "message": "Resuming paused ingest job. Poll get_ingest_status() for progress.",
+                    **_job_snapshot(active_job),
+                }
+            elif active_job and active_job.status in {"queued", "running"}:
                 return {
                     "status": "busy",
                     "message": "Another ingest job is already running.",
@@ -259,7 +431,7 @@ def start_ingest_directory(path: str, recursive: bool = True) -> dict[str, Any]:
     thread.start()
     return {
         "status": "started",
-        "message": "Ingest job started. Poll get_ingest_status(job_id) for progress.",
+        "message": "Ingest job started. Poll get_ingest_status(job_id) for progress. If job status is 'paused', call this tool again to resume.",
         **_job_snapshot(job),
     }
 
@@ -283,6 +455,18 @@ def get_ingest_status(job_id: str = "") -> dict[str, Any]:
         if job is None:
             raise ValueError(f"Unknown ingest job: {target_job_id}")
         return _job_snapshot(job)
+
+
+@mcp.tool()
+def get_ingest_log(job_id: str, tail_lines: int = 200) -> dict[str, Any]:
+    """Return the tail of the ingest log file for a given job id."""
+    path = _job_log_path(job_id)
+    if not path.exists():
+        raise ValueError(f"No log found for job: {job_id}")
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+    tail = lines[-tail_lines:] if tail_lines and len(lines) > tail_lines else lines
+    return {"job_id": job_id, "log": "".join(tail)}
 
 
 @mcp.tool()

@@ -11,6 +11,8 @@ filechatter/
 
 # Local data and binary artifacts
 data/
+logs/
+llmodels/
 *.sqlite3
 *.faiss
 
