@@ -11,6 +11,63 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {".txt", ".pdf", ".docx", ".doc"}
+CODE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".java",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".go",
+    ".rs",
+    ".rb",
+    ".php",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".psm1",
+    ".sql",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".html",
+    ".htm",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".vue",
+    ".swift",
+    ".kt",
+    ".kts",
+    ".dart",
+    ".scala",
+    ".lua",
+    ".pl",
+    ".pm",
+    ".r",
+    ".m",
+    ".mm",
+    ".groovy",
+    ".gradle",
+    ".lock",
+    ".cmake",
+}
+CODE_FILENAMES = {"dockerfile", "makefile"}
 
 
 def _has_module(module_name: str) -> bool:
@@ -130,6 +187,14 @@ def is_supported_file(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
 
 
+def infer_collection_name(path: Path) -> str:
+    resolved_path = path.expanduser().resolve()
+    name = resolved_path.name.lower()
+    if name in CODE_FILENAMES or resolved_path.suffix.lower() in CODE_EXTENSIONS:
+        return "code"
+    return "documentation"
+
+
 def load_document(path: Path) -> LoadedDocument:
     resolved_path = path.expanduser().resolve()
     if not is_supported_file(resolved_path):
@@ -137,12 +202,15 @@ def load_document(path: Path) -> LoadedDocument:
 
     reader = READERS[resolved_path.suffix.lower()]
     content = reader(resolved_path).strip()
+    collection_name = infer_collection_name(resolved_path)
     # Use full path as source to avoid collisions with same-named files in different directories
     metadata = {
         "source": str(resolved_path),
         "path": str(resolved_path),
         "filename": resolved_path.name,
         "extension": resolved_path.suffix.lower(),
+        "collection_name": collection_name,
+        "content_type": collection_name,
     }
     return LoadedDocument(path=resolved_path, content=content, metadata=metadata)
 

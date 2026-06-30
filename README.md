@@ -56,13 +56,17 @@ pip install -r requirements.txt
 ### Running the Server
 
 ```bash
+# On Windows (one-click setup + launch)
+rag.bat
+
 # On Windows and macOS/Linux:
 python rag_server.py
 ```
 
 The server will start on `http://localhost:8000`. View the API docs at `http://localhost:8000/docs`.
 
-Indexed data is persisted under `./data` by default.
+Indexed data is persisted under `./data/<collection_name>/` by default. The built-in collections are `documentation` and `code`.
+The first startup after upgrading will migrate legacy root-level `./data/rag.sqlite3` and `./data/chunks.faiss` into `./data/documentation/`.
 
 ### Using LM Studio via MCP
 
@@ -96,14 +100,17 @@ After that, LM Studio can use these tools during chat:
 - `list_sources`
 - `get_document_support`
 - `ingest_file`
-- `ingest_directory`
 - `start_ingest_directory`
 - `get_ingest_status`
 - `clear_index`
 
+Most read tools accept `collection_name="documentation"`, `collection_name="code"`, or `collection_name="all"`. Write tools also accept `collection_name="all"`; in that mode Filechatter auto-routes each file into the matching collection. If you pass a new explicit collection name, Filechatter creates a new on-disk collection directory for it.
+
 If ingestion fails for a specific file type, call `get_document_support` first. It reports which formats are currently ingest-ready and which optional dependencies are missing.
 
-For small folders, `ingest_directory` is fine. For larger folders, prefer `start_ingest_directory` so LM Studio does not sit in one long-running tool call and time out.
+For larger folders, prefer `start_ingest_directory` so LM Studio does not sit in one long-running tool call and time out.
+
+If a write call passes an unknown `collection_name`, Filechatter falls back to auto-routing instead of failing. That keeps `SOS`-style values from breaking ingest jobs.
 
 Recommended LM Studio workflow for large ingests:
 
@@ -182,12 +189,12 @@ python -m cli clear --yes
 ### API Endpoints
 
 - `GET /health` - Server health check
-- `POST /search` - Retrieve relevant chunks only
-- `POST /chat` - Compatibility endpoint that queries LM Studio directly
-- `POST /upload` - Upload documents
-- `GET /documents` - List indexed sources and chunk counts
-- `GET /chunks` - Inspect stored chunks for debugging
-- `DELETE /documents` - Clear all documents
+- `POST /search` - Retrieve relevant chunks only; accepts `collection_name`
+- `POST /chat` - Compatibility endpoint that queries LM Studio directly; accepts `collection_name`
+- `POST /upload` - Upload documents; accepts `collection_name`
+- `GET /documents` - List indexed sources and chunk counts; accepts `collection_name`
+- `GET /chunks` - Inspect stored chunks for debugging; accepts `collection_name`
+- `DELETE /documents` - Clear documents; accepts `collection_name`
 
 ### Example API Usage
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ class SearchResult:
     metadata: dict[str, Any]
     score: float
     rank: int
+    collection_name: str
 
 
 def _normalize_text(text: str) -> str:
@@ -50,11 +52,16 @@ def _extract_terms(text: str) -> list[str]:
 class RagStore:
     """Manage persisted chunk metadata and a FAISS index on disk."""
 
-    def __init__(self) -> None:
+    def __init__(self, collection_name: str = "documentation") -> None:
+        self.collection_name = collection_name
         self.data_dir = Path(config.DATA_DIR)
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.sqlite_path = self.data_dir / "rag.sqlite3"
-        self.index_path = self.data_dir / "chunks.faiss"
+        self.collection_dir = self.data_dir / self.collection_name
+        self.collection_dir.mkdir(parents=True, exist_ok=True)
+        self.sqlite_path = self.collection_dir / "rag.sqlite3"
+        self.index_path = self.collection_dir / "chunks.faiss"
+        self.info_path = self.collection_dir / "info.xml"
+        self._migrate_legacy_store()
         self.embedding_model = SentenceTransformer(config.EMBEDDING_MODEL)
         self.dimension = self.embedding_model.get_sentence_embedding_dimension()
         self._lock = threading.RLock()
@@ -63,7 +70,43 @@ class RagStore:
         self._ensure_schema()
         self.index = self._load_index()
         self._rebuild_rowid_cache()
+        self._write_info_file()
         self._closed = False
+
+    def _migrate_legacy_store(self) -> None:
+        if self.collection_name != "documentation":
+            return
+
+        legacy_sqlite = self.data_dir / "rag.sqlite3"
+        legacy_index = self.data_dir / "chunks.faiss"
+        if legacy_sqlite.exists() and not self.sqlite_path.exists():
+            shutil.copy2(legacy_sqlite, self.sqlite_path)
+        if legacy_index.exists() and not self.index_path.exists():
+            shutil.copy2(legacy_index, self.index_path)
+
+    def _write_info_file(self) -> None:
+        with self._lock:
+            document_count = self._connection.execute(
+                "SELECT COUNT(DISTINCT source) FROM chunks"
+            ).fetchone()[0]
+            chunk_count = self._connection.execute(
+                "SELECT COUNT(*) FROM chunks"
+            ).fetchone()[0]
+            last_updated = self._connection.execute(
+                "SELECT MAX(created_at) FROM chunks"
+            ).fetchone()[0]
+
+        xml = [
+            "<collection>",
+            f"  <name>{self.collection_name}</name>",
+            f"  <sqlite>{self.sqlite_path.name}</sqlite>",
+            f"  <index>{self.index_path.name}</index>",
+            f"  <documents>{document_count}</documents>",
+            f"  <chunks>{chunk_count}</chunks>",
+            f"  <lastUpdate>{last_updated or ''}</lastUpdate>",
+            "</collection>",
+        ]
+        self.info_path.write_text("\n".join(xml), encoding="utf-8")
 
     def _ensure_schema(self) -> None:
         with self._lock:
@@ -151,6 +194,7 @@ class RagStore:
             metadata=metadata,
             score=score,
             rank=rank,
+            collection_name=metadata.get("collection_name", self.collection_name),
         )
 
     def _semantic_candidates(self, question: str) -> list[int]:
@@ -263,6 +307,8 @@ class RagStore:
             for doc_index, document in enumerate(documents):
                 metadata = dict(metadata_list[doc_index] or {})
                 source = metadata.get("source") or f"document_{doc_index + 1}"
+                metadata.setdefault("collection_name", self.collection_name)
+                metadata.setdefault("content_type", self.collection_name)
                 document_chunks = self._chunk_document(document)
                 uploaded_sources.add(source)
 
@@ -274,6 +320,7 @@ class RagStore:
                             "chunk_index": chunk_index,
                             "start_char": start_char,
                             "end_char": end_char,
+                            "collection_name": self.collection_name,
                         }
                     )
                     pending_texts.append(chunk_text)
@@ -322,6 +369,7 @@ class RagStore:
             self.index.add(embeddings_array)
             self._save_index()
             self._rebuild_rowid_cache()
+            self._write_info_file()
 
             return {
                 "documents_uploaded": len(uploaded_sources),
@@ -392,6 +440,7 @@ class RagStore:
                         metadata=json.loads(row["metadata_json"]),
                         score=float(combined_scores[chunk_id]),
                         rank=rank,
+                        collection_name=self.collection_name,
                     )
                 )
                 seen_sources[source] = source_hits + 1
@@ -442,6 +491,7 @@ class RagStore:
             for row in rows:
                 chunk = dict(row)
                 chunk["metadata"] = json.loads(chunk.pop("metadata_json"))
+                chunk["collection_name"] = self.collection_name
                 chunks.append(chunk)
             return chunks
 
@@ -453,6 +503,7 @@ class RagStore:
             self.index = faiss.IndexFlatIP(self.dimension)
             self._save_index()
             self._rebuild_rowid_cache()
+            self._write_info_file()
 
     @property
     def chunk_count(self) -> int:

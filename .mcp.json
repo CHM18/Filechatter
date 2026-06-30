@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "filechatter": {
+      "command": "c:\\KI-Dateien\\Filechatter\\filechatter\\Scripts\\python.exe",
+      "args": ["c:\\KI-Dateien\\Filechatter\\rag_mcp_server.py"]
+    }
+  }
+}

@@ -7,6 +7,7 @@ from pathlib import Path
 import logging
 import traceback
 import threading
+from datetime import datetime
 from time import time
 from typing import Any
 from uuid import uuid4
@@ -30,7 +31,7 @@ def _build_instructions() -> str:
     instructions = (
         "Use these tools to search a local document index and manage indexed sources. "
         "Prefer search_documents for grounded retrieval before answering questions. "
-        "For large folders, prefer start_ingest_directory and then poll get_ingest_status instead of using the synchronous ingest_directory tool."
+        "For large folders, prefer start_ingest_directory and then poll get_ingest_status instead of using a long-running ingest call."
     )
 
     unavailable = [
@@ -50,12 +51,81 @@ mcp = FastMCP(
     json_response=True,
 )
 
-store = RagStore()
-atexit.register(store.close)
+COLLECTION_NAMES = ("documentation", "code")
+stores = {collection_name: RagStore(collection_name) for collection_name in COLLECTION_NAMES}
+for collection_store in stores.values():
+    atexit.register(collection_store.close)
 
-# Per-job ingest logs
-LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+_DASH_TRANSLATION = str.maketrans(
+    {
+        "\u2010": "-",  # Hyphen
+        "\u2011": "-",  # Non-breaking hyphen
+        "\u2012": "-",  # Figure dash
+        "\u2013": "-",  # En dash
+        "\u2014": "-",  # Em dash
+        "\u2015": "-",  # Horizontal bar
+        "\u2212": "-",  # Minus sign
+    }
+)
+
+
+def _normalize_input_path(path: str) -> Path:
+    # Normalize common Unicode dash variants copied from UIs/export tools.
+    return Path(path.translate(_DASH_TRANSLATION)).expanduser().resolve()
+
+
+def _normalize_collection_name(collection_name: str | None) -> str:
+    if not collection_name:
+        return "all"
+    normalized = collection_name.strip().lower()
+    if normalized in {"all", "*"}:
+        return "all"
+    return normalized
+
+
+def _get_or_create_store(collection_name: str) -> RagStore:
+    normalized = _normalize_collection_name(collection_name)
+    if normalized == "all":
+        raise ValueError("'all' does not map to a single store")
+
+    store = stores.get(normalized)
+    if store is None:
+        store = RagStore(normalized)
+        stores[normalized] = store
+        atexit.register(store.close)
+    return store
+
+
+def _selected_stores(collection_name: str) -> list[RagStore]:
+    normalized = _normalize_collection_name(collection_name)
+    if normalized == "all":
+        return list(stores.values())
+    return [_get_or_create_store(normalized)]
+
+
+def _store_for_metadata(metadata: dict[str, Any]) -> RagStore:
+    collection_name = metadata.get("collection_name") or metadata.get("content_type") or metadata.get("database_name")
+    if isinstance(collection_name, str) and collection_name.strip():
+        return _get_or_create_store(collection_name.strip().lower())
+    return _get_or_create_store("code") if str(metadata.get("extension", "")).lower() in {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cpp", ".sh", ".ps1", ".json", ".yaml", ".yml", ".toml"} else _get_or_create_store("documentation")
+
+
+def _job_log_path(collection_name: str, stamp: str) -> Path:
+    return _get_or_create_store(collection_name).collection_dir / f"ingest_{stamp}.log"
+
+
+def _append_collection_log(collection_name: str, stamp: str, message: str) -> None:
+    path = _job_log_path(collection_name, stamp)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(message.rstrip() + "\n")
+
+
+JOB_LOG_DIR = Path(__file__).resolve().parent / "logs"
+JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _job_trace_log_path(job_id: str) -> Path:
+    return JOB_LOG_DIR / f"ingest-{job_id}.log"
 
 # Global reference to active job log for signal handlers
 _active_log_path: Path | None = None
@@ -79,15 +149,9 @@ if hasattr(signal, 'SIGTERM'):
 if hasattr(signal, 'SIGINT'):
     signal.signal(signal.SIGINT, _signal_handler)
 
-LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
 # MCP tool timeout safety: process files in time-boxed batches
 # LM Studio likely has 60-90s timeout on tool calls, so we stop at 45s to be safe
 MAX_PROCESSING_TIME_PER_BATCH = 45  # seconds
-
-def _job_log_path(job_id: str) -> Path:
-    return LOG_DIR / f"ingest-{job_id}.log"
 
 
 @dataclass(slots=True)
@@ -96,6 +160,8 @@ class IngestJob:
     path: str
     recursive: bool
     total_files: int
+    collection_name: str = "all"
+    log_stamp: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
     status: str = "queued"
     processed_files: int = 0
     succeeded_files: int = 0
@@ -124,6 +190,7 @@ def _job_snapshot(job: IngestJob) -> dict[str, Any]:
         "status": job.status,
         "path": job.path,
         "recursive": job.recursive,
+        "collection_name": job.collection_name,
         "total_files": job.total_files,
         "processed_files": job.processed_files,
         "succeeded_files": job.succeeded_files,
@@ -138,6 +205,7 @@ def _job_snapshot(job: IngestJob) -> dict[str, Any]:
         # Full tracebacks and errors for detailed debugging
         "recent_errors_full": job.recent_errors,
         "error_full": job.error,
+        "log_stamp": job.log_stamp,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
     }
@@ -148,14 +216,14 @@ def _set_active_job(job_id: str | None) -> None:
     active_job_id = job_id
 
 
-def _run_ingest_job(job_id: str, paths: list[Path]) -> None:
+def _run_ingest_job(job_id: str, paths: list[Path], collection_name: str) -> None:
     global _active_log_path
     
     job = jobs[job_id]
     with job_lock:
         job.status = "running"
 
-    log_path = _job_log_path(job_id)
+    log_path = _job_trace_log_path(job_id)
     
     # Register this log file with signal handler
     with _active_log_lock:
@@ -164,7 +232,7 @@ def _run_ingest_job(job_id: str, paths: list[Path]) -> None:
     start_time = time()
     
     with open(log_path, "w", encoding="utf-8") as fh:
-        fh.write(f"JOB STARTED: {job_id} | {len(paths)} files to ingest | timestamp={start_time}\n")
+        fh.write(f"JOB STARTED: {job_id} | {len(paths)} files to ingest | collection={collection_name} | timestamp={start_time}\n")
         fh.flush()
     
     try:
@@ -206,6 +274,13 @@ def _run_ingest_job(job_id: str, paths: list[Path]) -> None:
                     fh.flush()
                 
                 loaded_document = load_document(file_path)
+                target_collection = job.collection_name
+                if target_collection == "all":
+                    target_collection = str(loaded_document.metadata.get("collection_name", "documentation")).strip().lower()
+                else:
+                    loaded_document.metadata["collection_name"] = target_collection
+                    loaded_document.metadata["content_type"] = target_collection
+                target_store = _get_or_create_store(target_collection)
                 
                 with open(log_path, "a", encoding="utf-8") as fh:
                     fh.write(f"[LOAD_OK] Loaded {len(loaded_document.content)} chars\n")
@@ -220,7 +295,7 @@ def _run_ingest_job(job_id: str, paths: list[Path]) -> None:
                 else:
                     try:
                         file_start_time = time()
-                        result = store.add_documents([content], [loaded_document.metadata])
+                        result = target_store.add_documents([content], [loaded_document.metadata])
                         elapsed = time() - file_start_time
                         with job_lock:
                             job.succeeded_files += result["documents_uploaded"]
@@ -229,6 +304,7 @@ def _run_ingest_job(job_id: str, paths: list[Path]) -> None:
                         with open(log_path, "a", encoding="utf-8") as fh:
                             fh.write(f"OK: {file_path} -> {result['documents_uploaded']} docs, {result['chunks_uploaded']} chunks ({elapsed:.2f}s)\n")
                             fh.flush()
+                        _append_collection_log(target_collection, job.log_stamp, f"OK: {file_path} -> {result['documents_uploaded']} docs, {result['chunks_uploaded']} chunks ({elapsed:.2f}s)")
                     except Exception as store_exc:
                         tb = traceback.format_exc()
                         err_msg = f"{file_path}: store.add_documents() failed: {store_exc}\n{tb}"
@@ -237,9 +313,10 @@ def _run_ingest_job(job_id: str, paths: list[Path]) -> None:
                             job.recent_errors.append(err_msg)
                         with open(log_path, "a", encoding="utf-8") as fh:
                             fh.write(f"ERROR (store): {err_msg}\n")
+                        _append_collection_log(target_collection, job.log_stamp, f"ERROR (store): {err_msg}")
                         # Try to recover by reloading the index
                         try:
-                            store.reload()
+                            target_store.reload()
                             with open(log_path, "a", encoding="utf-8") as fh:
                                 fh.write(f"INFO: Reloaded store index after error\n")
                         except Exception as reload_exc:
@@ -253,7 +330,6 @@ def _run_ingest_job(job_id: str, paths: list[Path]) -> None:
                     job.recent_errors.append(err_msg)
                 with open(log_path, "a", encoding="utf-8") as fh:
                     fh.write(f"ERROR: {err_msg}\n")
-        
         # Job completed or paused
         elapsed_total = time() - start_time
         with job_lock:
@@ -294,25 +370,43 @@ def _run_ingest_job(job_id: str, paths: list[Path]) -> None:
 
 
 def _ingest_paths(paths: list[Path]) -> dict[str, int]:
-    documents: list[str] = []
-    metadata: list[dict[str, Any]] = []
+    documents_by_collection: dict[str, list[str]] = {}
+    metadata_by_collection: dict[str, list[dict[str, Any]]] = {}
 
     for file_path in paths:
         loaded_document = load_document(file_path)
         content = loaded_document.content
         if not content.strip():
             continue
-        documents.append(content)
-        metadata.append(loaded_document.metadata)
 
-    if not documents:
-        return {"documents_uploaded": 0, "chunks_uploaded": 0, "total_chunks": store.chunk_count}
-    return store.add_documents(documents, metadata)
+        collection_name = str(loaded_document.metadata.get("collection_name", "documentation")).lower()
+        _get_or_create_store(collection_name)
+        documents_by_collection.setdefault(collection_name, []).append(content)
+        metadata_by_collection.setdefault(collection_name, []).append(loaded_document.metadata)
+
+    aggregated = {"documents_uploaded": 0, "chunks_uploaded": 0, "total_chunks": 0, "per_collection": {}}
+    for collection_name, documents in documents_by_collection.items():
+        if not documents:
+            continue
+        result = stores[collection_name].add_documents(documents, metadata_by_collection[collection_name])
+        aggregated["documents_uploaded"] += result["documents_uploaded"]
+        aggregated["chunks_uploaded"] += result["chunks_uploaded"]
+        aggregated["per_collection"][collection_name] = result
+
+    aggregated["total_chunks"] = sum(store.chunk_count for store in stores.values())
+    return aggregated
 
 
 @mcp.tool()
-def search_documents(query: str) -> list[dict[str, Any]]:
+def search_documents(query: str, collection_name: str = "all") -> list[dict[str, Any]]:
     """Search the local RAG index and return the most relevant chunks."""
+    normalized_collection = _normalize_collection_name(collection_name)
+    results = [
+        result
+        for selected_store in _selected_stores(normalized_collection)
+        for result in selected_store.search(query)
+    ]
+    results.sort(key=lambda result: (-result.score, result.collection_name, result.source, result.chunk_id))
     return [
         {
             "chunk_id": result.chunk_id,
@@ -321,18 +415,25 @@ def search_documents(query: str) -> list[dict[str, Any]]:
             "metadata": result.metadata,
             "score": result.score,
             "rank": result.rank,
+            "collection_name": result.collection_name,
         }
-        for result in store.search(query)
+        for result in results
     ]
 
 
 @mcp.tool()
-def list_sources() -> dict[str, Any]:
+def list_sources(collection_name: str = "all") -> dict[str, Any]:
     """List indexed sources and chunk counts in the local store."""
+    normalized_collection = _normalize_collection_name(collection_name)
+    selected_stores = _selected_stores(normalized_collection)
+    sources = []
+    for selected_store in selected_stores:
+        sources.extend(selected_store.list_sources())
     return {
-        "total_documents": len(store.list_sources()),
-        "total_chunks": store.chunk_count,
-        "sources": store.list_sources(),
+        "collection_name": normalized_collection,
+        "total_documents": len(sources),
+        "total_chunks": sum(selected_store.chunk_count for selected_store in selected_stores),
+        "sources": sources,
     }
 
 
@@ -354,37 +455,38 @@ def get_document_support() -> dict[str, Any]:
 
 
 @mcp.tool()
-def ingest_file(path: str) -> dict[str, int]:
+def ingest_file(path: str, collection_name: str = "all") -> dict[str, int]:
     """Index a single supported file into the local store."""
-    file_path = Path(path).expanduser().resolve()
+    file_path = _normalize_input_path(path)
     if not file_path.is_file():
         raise ValueError(f"File not found: {file_path}")
-    return _ingest_paths([file_path])
+    normalized_collection = _normalize_collection_name(collection_name)
+    if normalized_collection == "all":
+        return _ingest_paths([file_path])
+
+    loaded_document = load_document(file_path)
+    loaded_document.metadata["collection_name"] = normalized_collection
+    loaded_document.metadata["content_type"] = normalized_collection
+    if loaded_document.content.strip():
+        return _get_or_create_store(normalized_collection).add_documents([loaded_document.content], [loaded_document.metadata])
+    return {"documents_uploaded": 0, "chunks_uploaded": 0, "total_chunks": _get_or_create_store(normalized_collection).chunk_count}
 
 
 @mcp.tool()
-def ingest_directory(path: str, recursive: bool = True) -> dict[str, int]:
-    """Index all supported files from a directory into the local store synchronously."""
-    dir_path = Path(path).expanduser().resolve()
-    if not dir_path.is_dir():
-        raise ValueError(f"Directory not found: {dir_path}")
-
-    files = discover_documents(dir_path, recursive=recursive)
-    return _ingest_paths(files)
-
-
-@mcp.tool()
-def start_ingest_directory(path: str, recursive: bool = True) -> dict[str, Any]:
+def start_ingest_directory(path: str, recursive: bool = True, collection_name: str = "all") -> dict[str, Any]:
     """Start indexing a large directory in the background and return a job id for progress polling.
     
     This tool uses batch processing to work around MCP timeout limits. If a job returns status "paused",
     call this tool again to resume processing the remaining files."""
-    dir_path = Path(path).expanduser().resolve()
+    dir_path = _normalize_input_path(path)
     if not dir_path.is_dir():
         raise ValueError(f"Directory not found: {dir_path}")
 
     files = discover_documents(dir_path, recursive=recursive)
     job_id = str(uuid4())
+    normalized_collection = _normalize_collection_name(collection_name)
+    if normalized_collection != "all":
+        _get_or_create_store(normalized_collection)
 
     with job_lock:
         # Check if we have an active paused job we can resume
@@ -396,7 +498,7 @@ def start_ingest_directory(path: str, recursive: bool = True) -> dict[str, Any]:
                 active_job.remaining_file_count = 0
                 thread = threading.Thread(
                     target=_run_ingest_job,
-                    args=(active_job_id, files),
+                    args=(active_job_id, files, active_job.collection_name),
                     daemon=True,
                     name=f"filechatter-ingest-{active_job_id[:8]}-resume",
                 )
@@ -418,13 +520,14 @@ def start_ingest_directory(path: str, recursive: bool = True) -> dict[str, Any]:
             path=str(dir_path),
             recursive=recursive,
             total_files=len(files),
+            collection_name=normalized_collection,
         )
         jobs[job_id] = job
         _set_active_job(job_id)
 
     thread = threading.Thread(
         target=_run_ingest_job,
-        args=(job_id, files),
+        args=(job_id, files, normalized_collection),
         daemon=True,
         name=f"filechatter-ingest-{job_id[:8]}",
     )
@@ -458,9 +561,16 @@ def get_ingest_status(job_id: str = "") -> dict[str, Any]:
 
 
 @mcp.tool()
-def get_ingest_log(job_id: str, tail_lines: int = 200) -> dict[str, Any]:
+def get_ingest_log(job_id: str, tail_lines: int = 200, collection_name: str = "all") -> dict[str, Any]:
     """Return the tail of the ingest log file for a given job id."""
-    path = _job_log_path(job_id)
+    normalized_collection = _normalize_collection_name(collection_name)
+    if normalized_collection == "all":
+        path = _job_trace_log_path(job_id)
+    else:
+        job = jobs.get(job_id)
+        if job is None:
+            raise ValueError(f"Unknown ingest job: {job_id}")
+        path = _job_log_path(normalized_collection, job.log_stamp)
     if not path.exists():
         raise ValueError(f"No log found for job: {job_id}")
     with open(path, "r", encoding="utf-8") as fh:
@@ -470,17 +580,25 @@ def get_ingest_log(job_id: str, tail_lines: int = 200) -> dict[str, Any]:
 
 
 @mcp.tool()
-def clear_index(confirm: bool = False) -> dict[str, Any]:
+def clear_index(confirm: bool = False, collection_name: str = "all") -> dict[str, Any]:
     """Clear the local index. Set confirm=true to actually delete all indexed chunks."""
+    normalized_collection = _normalize_collection_name(collection_name)
     if not confirm:
         return {
             "status": "cancelled",
             "message": "Pass confirm=true to clear the index.",
-            "total_chunks": store.chunk_count,
+            "collection_name": normalized_collection,
+            "total_chunks": sum(store.chunk_count for store in _selected_stores(normalized_collection)),
         }
 
-    store.clear()
-    return {"status": "success", "message": "Index cleared", "total_chunks": 0}
+    for selected_store in _selected_stores(normalized_collection):
+        selected_store.clear()
+    return {
+        "status": "success",
+        "message": "Index cleared",
+        "collection_name": normalized_collection,
+        "total_chunks": sum(store.chunk_count for store in _selected_stores(normalized_collection)),
+    }
 
 
 if __name__ == "__main__":
