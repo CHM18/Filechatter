@@ -7,6 +7,7 @@ import re
 import shutil
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,8 +50,58 @@ def _extract_terms(text: str) -> list[str]:
     return terms
 
 
+def _parse_timestamp(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        try:
+            return float(candidate)
+        except ValueError:
+            pass
+        try:
+            dt = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _to_utc_iso(timestamp: float | None) -> str | None:
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
 class RagStore:
     """Manage persisted chunk metadata and a FAISS index on disk."""
+
+    _model_lock = threading.Lock()
+    _shared_model_name: str | None = None
+    _shared_embedding_model: SentenceTransformer | None = None
+    _shared_dimension: int | None = None
+
+    @classmethod
+    def _get_shared_embedding_model(cls) -> tuple[SentenceTransformer, int]:
+        model_name = config.EMBEDDING_MODEL
+        with cls._model_lock:
+            if cls._shared_embedding_model is None or cls._shared_model_name != model_name:
+                model = SentenceTransformer(model_name)
+                cls._shared_embedding_model = model
+                cls._shared_dimension = model.get_sentence_embedding_dimension()
+                cls._shared_model_name = model_name
+            return cls._shared_embedding_model, int(cls._shared_dimension or 0)
 
     def __init__(self, collection_name: str = "documentation") -> None:
         self.collection_name = collection_name
@@ -62,11 +113,14 @@ class RagStore:
         self.index_path = self.collection_dir / "chunks.faiss"
         self.info_path = self.collection_dir / "info.xml"
         self._migrate_legacy_store()
-        self.embedding_model = SentenceTransformer(config.EMBEDDING_MODEL)
-        self.dimension = self.embedding_model.get_sentence_embedding_dimension()
+        self.embedding_model, self.dimension = self._get_shared_embedding_model()
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(self.sqlite_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        # Defense in depth: the server process is the single writer, but WAL +
+        # busy_timeout keep SQLite safe if a stray process opens the same file.
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute("PRAGMA busy_timeout=5000")
         self._ensure_schema()
         self.index = self._load_index()
         self._rebuild_rowid_cache()
@@ -136,6 +190,24 @@ class RagStore:
                 USING fts5(source, content, tokenize='unicode61')
                 """
             )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS documents (
+                    source TEXT PRIMARY KEY,
+                    source_path TEXT NOT NULL,
+                    source_name TEXT NOT NULL,
+                    file_changed_at REAL,
+                    file_changed_at_iso TEXT,
+                    last_ingested_at TEXT NOT NULL
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_documents_source_name
+                ON documents(source_name)
+                """
+            )
             self._connection.commit()
             self._sync_fts_index()
 
@@ -178,6 +250,97 @@ class RagStore:
             self._row_id_to_faiss_index = {
                 row_id: index for index, row_id in enumerate(self._row_ids)
             }
+
+    def _chunk_count_for_source(self, source: str) -> int:
+        row = self._connection.execute(
+            "SELECT COUNT(*) AS count FROM chunks WHERE source = ?",
+            (source,),
+        ).fetchone()
+        return int(row["count"] if row else 0)
+
+    def _get_document_record(self, source: str) -> sqlite3.Row | None:
+        return self._connection.execute(
+            "SELECT * FROM documents WHERE source = ?",
+            (source,),
+        ).fetchone()
+
+    def _extract_file_changed_timestamp(self, metadata: dict[str, Any]) -> float | None:
+        for key in (
+            "file_changed_epoch",
+            "file_changed_ts",
+            "file_changed_at",
+            "modified_at",
+            "last_modified",
+        ):
+            parsed = _parse_timestamp(metadata.get(key))
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _upsert_document_record(
+        self,
+        source: str,
+        metadata: dict[str, Any],
+        file_changed_timestamp: float | None,
+        ingested_at: str,
+    ) -> None:
+        source_path = str(metadata.get("path") or source)
+        source_name = str(metadata.get("filename") or Path(source_path).name or Path(source).name)
+        file_changed_at_iso = _to_utc_iso(file_changed_timestamp)
+        self._connection.execute(
+            """
+            INSERT INTO documents(source, source_path, source_name, file_changed_at, file_changed_at_iso, last_ingested_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source) DO UPDATE SET
+                source_path=excluded.source_path,
+                source_name=excluded.source_name,
+                file_changed_at=excluded.file_changed_at,
+                file_changed_at_iso=excluded.file_changed_at_iso,
+                last_ingested_at=excluded.last_ingested_at
+            """,
+            (
+                source,
+                source_path,
+                source_name,
+                file_changed_timestamp,
+                file_changed_at_iso,
+                ingested_at,
+            ),
+        )
+
+    def _delete_chunks_for_source(self, source: str) -> int:
+        removed_count = self._chunk_count_for_source(source)
+        if removed_count == 0:
+            return 0
+
+        self._connection.execute(
+            "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE source = ?)",
+            (source,),
+        )
+        self._connection.execute(
+            "DELETE FROM chunks WHERE source = ?",
+            (source,),
+        )
+        return removed_count
+
+    def _rebuild_index_from_chunks(self) -> None:
+        rows = self._connection.execute(
+            "SELECT content FROM chunks ORDER BY id ASC"
+        ).fetchall()
+        if not rows:
+            self.index = faiss.IndexFlatIP(self.dimension)
+            self._save_index()
+            self._rebuild_rowid_cache()
+            return
+
+        texts = [row["content"] for row in rows]
+        embeddings = self.embedding_model.encode(texts, normalize_embeddings=True)
+        embeddings_array = np.asarray(embeddings, dtype=np.float32)
+        rebuilt = faiss.IndexFlatIP(self.dimension)
+        rebuilt.add(embeddings_array)
+        self.index = rebuilt
+        self._save_index()
+        self._rebuild_rowid_cache()
 
     def reload(self) -> None:
         with self._lock:
@@ -303,14 +466,47 @@ class RagStore:
             pending_texts: list[str] = []
             pending_rows: list[tuple[str, str, str, int, int, int]] = []
             uploaded_sources: set[str] = set()
+            replaced_sources: set[str] = set()
+            skipped_outdated_sources: set[str] = set()
+            source_updates: dict[str, tuple[dict[str, Any], float | None, str]] = {}
+            deleted_chunks = 0
 
             for doc_index, document in enumerate(documents):
                 metadata = dict(metadata_list[doc_index] or {})
-                source = metadata.get("source") or f"document_{doc_index + 1}"
+                source = str(metadata.get("source") or f"document_{doc_index + 1}")
                 metadata.setdefault("collection_name", self.collection_name)
                 metadata.setdefault("content_type", self.collection_name)
+                file_changed_ts = self._extract_file_changed_timestamp(metadata)
+                file_changed_at = _to_utc_iso(file_changed_ts)
+                if file_changed_ts is not None:
+                    metadata["file_changed_epoch"] = file_changed_ts
+                if file_changed_at is not None:
+                    metadata["file_changed_at"] = file_changed_at
+
+                existing_chunk_count = self._chunk_count_for_source(source)
+                if existing_chunk_count > 0:
+                    existing_record = self._get_document_record(source)
+                    existing_changed_ts = None
+                    if existing_record is not None:
+                        existing_changed_ts = _parse_timestamp(existing_record["file_changed_at"])
+
+                    if file_changed_ts is None:
+                        skipped_outdated_sources.add(source)
+                        continue
+                    if existing_changed_ts is not None and file_changed_ts <= existing_changed_ts:
+                        skipped_outdated_sources.add(source)
+                        continue
+
+                    deleted_chunks += self._delete_chunks_for_source(source)
+                    replaced_sources.add(source)
+
                 document_chunks = self._chunk_document(document)
+                ingested_at = datetime.now(timezone.utc).isoformat()
+                source_updates[source] = (metadata, file_changed_ts, ingested_at)
                 uploaded_sources.add(source)
+
+                if not document_chunks:
+                    continue
 
                 for chunk_index, (chunk_text, start_char, end_char) in enumerate(document_chunks):
                     chunk_metadata = dict(metadata)
@@ -321,6 +517,9 @@ class RagStore:
                             "start_char": start_char,
                             "end_char": end_char,
                             "collection_name": self.collection_name,
+                            "ingested_at": ingested_at,
+                            "source_path": str(metadata.get("path") or source),
+                            "source_name": str(metadata.get("filename") or Path(source).name),
                         }
                     )
                     pending_texts.append(chunk_text)
@@ -335,46 +534,55 @@ class RagStore:
                         )
                     )
 
-            if not pending_rows:
-                return {"documents_uploaded": 0, "chunks_uploaded": 0, "total_chunks": self.chunk_count}
+            if pending_rows:
+                embeddings = self.embedding_model.encode(pending_texts, normalize_embeddings=True)
+                embeddings_array = np.asarray(embeddings, dtype=np.float32)
 
-            embeddings = self.embedding_model.encode(pending_texts, normalize_embeddings=True)
-            embeddings_array = np.asarray(embeddings, dtype=np.float32)
+                previous_max_id = self._connection.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM chunks"
+                ).fetchone()[0]
+                self._connection.executemany(
+                    """
+                    INSERT INTO chunks(source, content, metadata_json, chunk_index, start_char, end_char)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    pending_rows,
+                )
 
-            previous_max_id = self._connection.execute(
-                "SELECT COALESCE(MAX(id), 0) FROM chunks"
-            ).fetchone()[0]
-            cursor = self._connection.cursor()
-            cursor.executemany(
-                """
-                INSERT INTO chunks(source, content, metadata_json, chunk_index, start_char, end_char)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                pending_rows,
-            )
+                inserted_ids = list(
+                    range(previous_max_id + 1, previous_max_id + len(pending_rows) + 1)
+                )
+                self._connection.executemany(
+                    "INSERT INTO chunks_fts(rowid, source, content) VALUES (?, ?, ?)",
+                    [
+                        (inserted_id, row[0], row[1])
+                        for inserted_id, row in zip(inserted_ids, pending_rows)
+                    ],
+                )
+            else:
+                embeddings_array = None
+
+            for source, (metadata, changed_ts, ingested_at) in source_updates.items():
+                self._upsert_document_record(source, metadata, changed_ts, ingested_at)
+
             self._connection.commit()
 
-            inserted_ids = list(
-                range(previous_max_id + 1, previous_max_id + len(pending_rows) + 1)
-            )
-            self._connection.executemany(
-                "INSERT INTO chunks_fts(rowid, source, content) VALUES (?, ?, ?)",
-                [
-                    (inserted_id, row[0], row[1])
-                    for inserted_id, row in zip(inserted_ids, pending_rows)
-                ],
-            )
-            self._connection.commit()
+            if replaced_sources:
+                self._rebuild_index_from_chunks()
+            elif embeddings_array is not None and len(pending_rows) > 0:
+                self.index.add(embeddings_array)
+                self._save_index()
+                self._rebuild_rowid_cache()
 
-            self.index.add(embeddings_array)
-            self._save_index()
-            self._rebuild_rowid_cache()
             self._write_info_file()
 
             return {
                 "documents_uploaded": len(uploaded_sources),
                 "chunks_uploaded": len(pending_rows),
                 "total_chunks": self.chunk_count,
+                "replaced_documents": len(replaced_sources),
+                "skipped_outdated_documents": len(skipped_outdated_sources),
+                "deleted_chunks": deleted_chunks,
             }
 
     def search(self, question: str) -> list[SearchResult]:
@@ -455,16 +663,38 @@ class RagStore:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT source,
+                SELECT c.source,
                        COUNT(*) AS chunk_count,
-                       MIN(created_at) AS first_indexed_at,
-                       MAX(created_at) AS last_indexed_at
-                FROM chunks
-                GROUP BY source
-                ORDER BY source ASC
+                       MIN(c.created_at) AS first_indexed_at,
+                       MAX(c.created_at) AS last_indexed_at,
+                       d.source_path,
+                       d.source_name,
+                       d.file_changed_at_iso AS file_changed_at,
+                       d.last_ingested_at AS last_ingested_at
+                FROM chunks c
+                LEFT JOIN documents d ON d.source = c.source
+                GROUP BY c.source, d.source_path, d.source_name, d.file_changed_at_iso, d.last_ingested_at
+                ORDER BY c.source ASC
                 """
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def clear_source(self, source: str) -> dict[str, Any]:
+        with self._lock:
+            removed_chunks = self._delete_chunks_for_source(source)
+            self._connection.execute(
+                "DELETE FROM documents WHERE source = ?",
+                (source,),
+            )
+            self._connection.commit()
+            if removed_chunks > 0:
+                self._rebuild_index_from_chunks()
+            self._write_info_file()
+            return {
+                "source": source,
+                "deleted_chunks": removed_chunks,
+                "total_chunks": self.chunk_count,
+            }
 
     def get_chunks(
         self,
@@ -499,11 +729,16 @@ class RagStore:
         with self._lock:
             self._connection.execute("DELETE FROM chunks")
             self._connection.execute("DELETE FROM chunks_fts")
+            self._connection.execute("DELETE FROM documents")
             self._connection.commit()
             self.index = faiss.IndexFlatIP(self.dimension)
             self._save_index()
             self._rebuild_rowid_cache()
             self._write_info_file()
+
+    def chunk_count_for_source(self, source: str) -> int:
+        with self._lock:
+            return self._chunk_count_for_source(source)
 
     @property
     def chunk_count(self) -> int:

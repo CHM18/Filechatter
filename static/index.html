@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Filechatter</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📁</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">📁 Filechatter</div>
+    <nav class="tabs">
+      <button class="tab" data-panel="status">Status</button>
+      <button class="tab active" data-panel="chat">Chat</button>
+      <button class="tab" data-panel="databases">Databases</button>
+      <button class="tab" data-panel="permissions">Permissions</button>
+    </nav>
+    <div id="server-badge" class="badge badge-unknown">checking…</div>
+  </header>
+
+  <main>
+    <!-- ============ Chat panel ============ -->
+    <section id="panel-chat" class="panel active">
+      <div class="chat-layout">
+        <aside class="chat-sidebar">
+          <div class="side-group">
+            <h3>Endpoint</h3>
+            <label class="side-field">Provider
+              <select id="chat-provider">
+                <option value="lmstudio">LM Studio</option>
+                <option value="ollama">Ollama</option>
+                <option value="openai_compat">OpenAI-compatible</option>
+              </select>
+            </label>
+            <label class="side-field">Base URL
+              <input type="text" id="chat-base-url" placeholder="http://localhost:1234">
+            </label>
+            <label class="side-field">Model
+              <span class="model-row">
+                <select id="chat-model"></select>
+                <button type="button" class="btn btn-small" id="chat-refresh-models" title="Reload model list">⟳</button>
+              </span>
+            </label>
+            <button type="button" class="btn btn-small" id="chat-test">Test connection</button>
+            <div id="chat-endpoint-status" class="endpoint-status"></div>
+          </div>
+
+          <div class="side-group">
+            <h3>Read from</h3>
+            <div id="chat-read-dbs" class="db-checklist"></div>
+          </div>
+          <div class="side-group">
+            <h3>Write to</h3>
+            <div id="chat-write-dbs" class="db-checklist"></div>
+          </div>
+          <button type="button" class="btn btn-small" id="chat-reset">New conversation</button>
+        </aside>
+
+        <div class="chat-main">
+          <div id="chat-messages" class="chat-messages">
+            <div class="chat-empty">Ask a question about your documents. Selected read databases are searched to ground the answer.</div>
+          </div>
+          <form id="chat-form" class="chat-input">
+            <textarea id="chat-text" rows="2" placeholder="Ask about your documents…  (Enter to send, Shift+Enter for newline)"></textarea>
+            <button type="submit" class="btn btn-primary" id="chat-send">Send</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Status panel ============ -->
+    <section id="panel-status" class="panel">
+      <h2>Server status</h2>
+      <div class="cards" id="status-cards">
+        <div class="card"><div class="card-label">Server</div><div class="card-value" id="stat-server">–</div></div>
+        <div class="card"><div class="card-label">LM Studio</div><div class="card-value" id="stat-lmstudio">–</div></div>
+        <div class="card"><div class="card-label">Collections</div><div class="card-value" id="stat-collections">–</div></div>
+        <div class="card"><div class="card-label">Documents</div><div class="card-value" id="stat-documents">–</div></div>
+        <div class="card"><div class="card-label">Chunks</div><div class="card-value" id="stat-chunks">–</div></div>
+      </div>
+      <h2>Configuration</h2>
+      <div class="card wide">
+        <table class="kv-table" id="settings-table">
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint">Endpoint and permission settings become editable here in milestones M3/M4.</p>
+    </section>
+
+    <!-- ============ Databases panel ============ -->
+    <section id="panel-databases" class="panel">
+      <div class="panel-header">
+        <h2>RAG databases</h2>
+        <button class="btn btn-primary" id="btn-new-collection">+ New database</button>
+      </div>
+      <div id="collections-list" class="collections-list"></div>
+    </section>
+
+    <!-- ============ Permissions panel ============ -->
+    <section id="panel-permissions" class="panel">
+      <div class="panel-header">
+        <h2>Tool permissions</h2>
+        <label class="switch">
+          <input type="checkbox" id="advanced-toggle">
+          Advanced configuration
+        </label>
+      </div>
+      <p class="hint">
+        Controls which tools the model may call. <b>Deny</b> hides the tool from the model entirely.
+        <b>Ask</b> requires confirmation before it runs. These settings apply to the built-in chat
+        (coming in M4) and to MCP hosts such as Claude Desktop and LM Studio. A group button shown
+        <span class="mixed-legend">faded</span> means some of its tools were overridden in advanced
+        mode; click it to reset them.
+      </p>
+
+      <div id="perm-container"></div>
+
+      <div id="advanced-extras" class="hidden">
+        <h2>MCP host behavior</h2>
+        <div class="card wide">
+          <label class="inline-field">
+            When an <b>Ask</b> tool is called from an MCP host (no browser dialog available):
+            <select id="on-ask-select">
+              <option value="host_confirm">Run it (host shows its own confirmation)</option>
+              <option value="elicit">Try MCP elicitation, else run it</option>
+              <option value="deny">Refuse the call</option>
+            </select>
+          </label>
+          <p class="hint">
+            Visibility changes reach MCP hosts only after the host reconnects or restarts; the server
+            still enforces every rule immediately at call time.
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ Create dialog ============ -->
+  <dialog id="dialog-create">
+    <form method="dialog" id="form-create">
+      <h3>Create new database</h3>
+      <label>
+        Name
+        <input type="text" id="create-name" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"
+               placeholder="e.g. project-docs"
+               title="Lowercase letters, digits, - and _ only">
+      </label>
+      <label>
+        Description
+        <textarea id="create-description" rows="2"
+                  placeholder="What belongs in this database? (also guides the model when auto-selecting a write target)"></textarea>
+      </label>
+      <fieldset>
+        <legend>
+          <span>Allowed file types <span class="hint">(none selected = all supported types)</span></span>
+          <label class="switch adv-inline"><input type="checkbox" id="ext-advanced"> Individual types</label>
+        </legend>
+        <div id="ext-categories" class="ext-categories"></div>
+      </fieldset>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="btn-create-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create</button>
+      </div>
+      <div class="form-error" id="create-error"></div>
+    </form>
+  </dialog>
+
+  <!-- ============ Delete dialog ============ -->
+  <dialog id="dialog-delete">
+    <form method="dialog" id="form-delete">
+      <h3>Delete database</h3>
+      <p id="delete-message"></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="btn-delete-cancel">Cancel</button>
+        <button type="submit" class="btn btn-danger">Delete permanently</button>
+      </div>
+      <div class="form-error" id="delete-error"></div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="js/api.js"></script>
+  <script src="js/collections.js"></script>
+  <script src="js/permissions.js"></script>
+  <script src="js/chat.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

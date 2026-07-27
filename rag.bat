@@ -3,7 +3,7 @@ setlocal EnableExtensions
 
 REM Filechatter one-click Windows setup + launch script
 REM - Ensures Python is available
-REM - Creates venv if missing (prefers existing .\filechatter or .\venv)
+REM - Creates venv if missing (prefers existing .\.venv or legacy names)
 REM - Sets PowerShell execution policy (CurrentUser RemoteSigned)
 REM - Activates venv, installs requirements, starts rag_server.py
 
@@ -13,12 +13,15 @@ set "SCRIPT_DIR=%~dp0"
 set "REQ_FILE=%SCRIPT_DIR%requirements.txt"
 set "SERVER_FILE=%SCRIPT_DIR%rag_server.py"
 
-if exist "%SCRIPT_DIR%filechatter\Scripts\python.exe" (
+set "VENV_DIR=%SCRIPT_DIR%.venv_filechatter"
+if exist "%SCRIPT_DIR%.venv\Scripts\python.exe" (
+    set "VENV_DIR=%SCRIPT_DIR%.venv"
+) else if exist "%SCRIPT_DIR%.venv_filechatter\Scripts\python.exe" (
+    set "VENV_DIR=%SCRIPT_DIR%.venv_filechatter"
+) else if exist "%SCRIPT_DIR%filechatter\Scripts\python.exe" (
     set "VENV_DIR=%SCRIPT_DIR%filechatter"
 ) else if exist "%SCRIPT_DIR%venv\Scripts\python.exe" (
     set "VENV_DIR=%SCRIPT_DIR%venv"
-) else (
-    set "VENV_DIR=%SCRIPT_DIR%filechatter"
 )
 
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"

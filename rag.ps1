@@ -8,14 +8,43 @@
 param(
     [switch]$runOnly,       # -r: Just run rag_server.py without checking/installing
     [switch]$installOnly,   # -i: Install dependencies only
-    [switch]$skipRun        # -s: Skip running the server after installation
+    [switch]$skipRun,       # -s: Skip running the server after installation
+    [switch]$noBrowser      # -n: Do not open the web UI in the default browser
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = $PSScriptRoot
-$VenvPath = Join-Path $ScriptDir "venv"
-$VenvPython = Join-Path $VenvPath "Scripts" "python.exe"
+
+# Accept any of the venv directory names used by this project over time.
+$VenvPath = $null
+foreach ($candidate in @("venv", ".venv", "filechatter")) {
+    $candidatePath = Join-Path $ScriptDir $candidate
+    if (Test-Path (Join-Path $candidatePath "Scripts\python.exe")) {
+        $VenvPath = $candidatePath
+        break
+    }
+}
+if (-not $VenvPath) { $VenvPath = Join-Path $ScriptDir "venv" }
+$VenvPython = Join-Path $VenvPath "Scripts\python.exe"
 $RequirementsFile = Join-Path $ScriptDir "requirements.txt"
+
+function Start-BrowserWhenReady {
+    if ($noBrowser) { return }
+    # Poll /health in the background; open the web UI once the server is up.
+    Start-Job -ScriptBlock {
+        param($baseUrl)
+        for ($i = 0; $i -lt 60; $i++) {
+            try {
+                $response = Invoke-WebRequest -Uri "$baseUrl/health" -UseBasicParsing -TimeoutSec 2
+                if ($response.StatusCode -eq 200) {
+                    Start-Process "$baseUrl/ui/"
+                    return
+                }
+            } catch { }
+            Start-Sleep -Seconds 1
+        }
+    } -ArgumentList "http://localhost:8000" | Out-Null
+}
 
 function Write-Status($message) {
     Write-Host "`n== $message ==" -ForegroundColor Cyan
@@ -123,6 +152,7 @@ if ($runOnly) {
     
     Write-Status "Starting RAG server..."
     Activate-Venv
+    Start-BrowserWhenReady
     & $VenvPython (Join-Path $ScriptDir "rag_server.py")
     exit $LASTEXITCODE
 }
@@ -154,6 +184,7 @@ if (-not $depsReady) {
 if (-not $skipRun) {
     Write-Status "Starting RAG server..."
     Activate-Venv
+    Start-BrowserWhenReady
     & $VenvPython (Join-Path $ScriptDir "rag_server.py")
     exit $LASTEXITCODE
 }
