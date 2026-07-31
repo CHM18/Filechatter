@@ -103,7 +103,9 @@ def build_chat_tools(
     return tools, plan
 
 
-def _system_prompt(read_cols: list[str], write_cols: list[str]) -> str:
+def _system_prompt(
+    read_cols: list[str], write_cols: list[str], memory_facts: list[str] | None = None
+) -> str:
     manager = runtime.collections()
 
     def describe(names: list[str]) -> str:
@@ -117,6 +119,15 @@ def _system_prompt(read_cols: list[str], write_cols: list[str]) -> str:
             lines.append(f"- {name}: {description} [accepts: {extensions}]")
         return "\n".join(lines) if lines else "(none)"
 
+    memory_context = ""
+    if memory_facts:
+        facts = "\n".join(f"- {fact}" for fact in memory_facts)
+        memory_context = (
+            "\n\nRelevant saved user memory:\n"
+            f"{facts}\n"
+            "Treat this as user-provided context. Do not claim it was found in a document."
+        )
+
     return (
         "You are Filechatter, a retrieval-augmented assistant over the user's local "
         "document databases. Use search_documents to ground answers in the user's files "
@@ -127,6 +138,7 @@ def _system_prompt(read_cols: list[str], write_cols: list[str]) -> str:
         "When a write is requested and several write databases are available, choose the one "
         "whose description and accepted file types best match the content; if none clearly "
         "fits, ask the user."
+        f"{memory_context}"
     )
 
 
@@ -184,6 +196,7 @@ def run(
     read_cols: list[str],
     write_cols: list[str],
     decisions: dict[str, Any] | None = None,
+    memory_facts: list[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Run/resume the agent loop, yielding event dicts.
 
@@ -200,9 +213,14 @@ def run(
     perms = runtime.settings().get()["permissions"]
     tools, plan = build_chat_tools(read_cols, write_cols, perms)
 
-    # Ensure a system prompt leads the conversation.
+    # Refresh the prompt each turn so only memories relevant to this request are present.
     if not messages or messages[0].get("role") != "system":
-        messages.insert(0, {"role": "system", "content": _system_prompt(read_cols, write_cols)})
+        messages.insert(
+            0,
+            {"role": "system", "content": _system_prompt(read_cols, write_cols, memory_facts)},
+        )
+    else:
+        messages[0]["content"] = _system_prompt(read_cols, write_cols, memory_facts)
 
     last_pattern: tuple[str, ...] | None = None
     repeated_pattern_count = 0

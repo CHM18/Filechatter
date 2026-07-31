@@ -74,6 +74,22 @@ const api = {
     return this.request("/llm/models");
   },
 
+  listMemories() {
+    return this.request("/memories");
+  },
+
+  updateMemory(id, body) {
+    return this.request(`/memories/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+  },
+
+  deleteMemory(id) {
+    return this.request(`/memories/${id}`, { method: "DELETE" });
+  },
+
+  clearMemories() {
+    return this.request("/memories?confirm=true", { method: "DELETE" });
+  },
+
   // Stream chat events. `onEvent(evt)` is called per SSE event; resolves when the stream ends.
   async streamChat(body, onEvent) {
     const response = await fetch("/chat/stream", {
@@ -89,7 +105,7 @@ const api = {
       throw new Error(detail);
     }
     const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+    const decoder = new TextDecoder("utf-8", { fatal: true });
     let buffer = "";
     while (true) {
       const { done, value } = await reader.read();
@@ -103,6 +119,10 @@ const api = {
           onEvent(JSON.parse(chunk.slice(5).trim()));
         }
       }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim().startsWith("data:")) {
+      onEvent(JSON.parse(buffer.trim().slice(5).trim()));
     }
   },
 };

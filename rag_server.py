@@ -8,6 +8,7 @@ import json
 import uuid
 import threading
 import time
+import re
 from pathlib import Path
 from typing import Any
 from contextlib import asynccontextmanager
@@ -28,6 +29,7 @@ import runtime
 import tool_registry
 from collections_manager import CollectionLockedError
 from llm_providers import ProviderError, build_provider
+from memory_store import MEMORY_CATEGORIES, validate_memory
 from rag_store import SearchResult
 from langchain_support import LMStudioChatClient, build_prompt, format_context, parse_model_output
 
@@ -38,7 +40,13 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 _MODEL_CACHE_TTL_SECONDS = 60
 _MODEL_CACHE_LOCK = threading.Lock()
-_MODEL_CACHE: dict[tuple[str, str, str], tuple[float, list[str]]] = {}
+_MODEL_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
+MAX_MEMORY_FACTS_PER_TURN = 3
+MAX_MEMORY_CONTEXT_CHARS = 800
+SENSITIVE_MEMORY_RE = re.compile(
+    r"\b(?:password|passphrase|api[ _-]?key|access[ _-]?token|secret|ssn|social security|credit card)\b",
+    re.IGNORECASE,
+)
 
 
 @asynccontextmanager
@@ -96,7 +104,10 @@ def _total_chunks(collection_name: str) -> int:
 
 def _cached_model_list(llm_settings: dict[str, Any], force: bool = False) -> list[str]:
     provider = build_provider(llm_settings)
-    cache_key = (provider.base_url, provider.api_key or "", provider.model)
+    cache_key = (
+        str(getattr(provider, "base_url", llm_settings.get("base_url", ""))),
+        str(getattr(provider, "api_key", llm_settings.get("api_key", "")) or ""),
+    )
     now = time.monotonic()
     with _MODEL_CACHE_LOCK:
         cached = _MODEL_CACHE.get(cache_key)
@@ -195,6 +206,17 @@ class ChatStreamRequest(BaseModel):
     decisions: dict[str, Any] = Field(default_factory=dict)
 
 
+class MemoryCreateRequest(BaseModel):
+    category: str
+    fact: str
+
+
+class MemoryUpdateRequest(BaseModel):
+    category: str | None = None
+    fact: str | None = None
+    enabled: bool | None = None
+
+
 def _serialize_result(result: SearchResult) -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=result.chunk_id,
@@ -211,12 +233,9 @@ def _serialize_result(result: SearchResult) -> RetrievedChunk:
 async def health_check():
     """Check server health and connectivity"""
     try:
-        response = requests.get(
-            f"{LM_STUDIO_BASE_URL}/v1/models",
-            timeout=5
-        )
-        lm_studio_ok = response.status_code == 200
-    except Exception as e:
+        _cached_model_list(runtime.settings().get()["llm"])
+        lm_studio_ok = True
+    except ProviderError as e:
         lm_studio_ok = False
         logger.warning(f"LM Studio connection issue: {e}")
 
@@ -382,6 +401,56 @@ async def set_permissions(request: PermissionsUpdateRequest):
 
 
 # ----------------------------------------------------------------------
+# Local long-term memory API
+# ----------------------------------------------------------------------
+
+
+@app.get("/memories")
+async def list_memories():
+    return {"memories": [memory.to_dict() for memory in runtime.memories().list()]}
+
+
+@app.post("/memories", status_code=201)
+async def create_memory(request: MemoryCreateRequest):
+    try:
+        memory = runtime.memories().add(request.category, request.fact)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"memory": memory.to_dict()}
+
+
+@app.patch("/memories/{memory_id}")
+async def update_memory(memory_id: int, request: MemoryUpdateRequest):
+    current = runtime.memories().get(memory_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Memory not found.")
+    try:
+        memory = runtime.memories().update(
+            memory_id,
+            request.category if request.category is not None else current.category,
+            request.fact if request.fact is not None else current.fact,
+            request.enabled if request.enabled is not None else current.enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    assert memory is not None
+    return {"memory": memory.to_dict()}
+
+
+@app.delete("/memories/{memory_id}", status_code=204)
+async def delete_memory(memory_id: int):
+    if not runtime.memories().delete(memory_id):
+        raise HTTPException(status_code=404, detail="Memory not found.")
+
+
+@app.delete("/memories")
+async def clear_memories(confirm: bool = False):
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Pass confirm=true to clear all memories.")
+    return {"deleted": runtime.memories().clear()}
+
+
+# ----------------------------------------------------------------------
 # LLM endpoint helpers (browser chat, OpenAI-compatible only)
 # ----------------------------------------------------------------------
 
@@ -411,6 +480,77 @@ async def llm_test():
 # ----------------------------------------------------------------------
 
 
+def _memory_context(message: str | None) -> list[str]:
+    if not message:
+        return []
+    facts: list[str] = []
+    remaining = MAX_MEMORY_CONTEXT_CHARS
+    for memory in runtime.memories().search(message):
+        if len(memory.fact) > remaining:
+            continue
+        facts.append(memory.fact)
+        remaining -= len(memory.fact)
+    return facts
+
+
+def _parse_extracted_memories(content: str) -> list[tuple[str, str]]:
+    value = content.strip()
+    if value.startswith("```") and value.endswith("```"):
+        value = value.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    candidates = payload.get("memories", []) if isinstance(payload, dict) else []
+    facts: list[tuple[str, str]] = []
+    for candidate in candidates[:MAX_MEMORY_FACTS_PER_TURN]:
+        if not isinstance(candidate, dict):
+            continue
+        category = candidate.get("category")
+        fact = candidate.get("fact")
+        if not isinstance(category, str) or not isinstance(fact, str):
+            continue
+        if category not in MEMORY_CATEGORIES or SENSITIVE_MEMORY_RE.search(fact):
+            continue
+        try:
+            facts.append(validate_memory(category, fact))
+        except ValueError:
+            continue
+    return facts
+
+
+def _extract_memory_facts(provider: Any, user_message: str, assistant_message: str) -> None:
+    """Extract only structured preference/workflow facts from a completed turn."""
+    prompt = (
+        "Extract durable user preferences or workflow facts stated directly by the user. "
+        "Ignore tool activity, document content, factual claims from the assistant, and anything "
+        "sensitive or personal. Return JSON only: {\"memories\":[{\"category\":\"preference\" "
+        "or \"workflow\",\"fact\":\"concise fact\"}]}. Return an empty array when no fact qualifies.\n\n"
+        f"User message:\n{user_message[:2000]}\n\n"
+        f"Assistant response:\n{assistant_message[:4000]}"
+    )
+    response = ""
+    try:
+        for kind, value in provider.stream(
+            [
+                {"role": "system", "content": "You return valid JSON and nothing else."},
+                {"role": "user", "content": prompt},
+            ]
+        ):
+            if kind == "message" and isinstance(value, dict):
+                response = str(value.get("content") or "")
+    except ProviderError as exc:
+        logger.info("Memory extraction skipped: %s", exc)
+        return
+
+    for category, fact in _parse_extracted_memories(response):
+        try:
+            runtime.memories().add(category, fact)
+        except ValueError:
+            # Duplicate and validation failures are expected for automatic capture.
+            continue
+
+
 @app.post("/chat/stream")
 async def chat_stream(request: ChatStreamRequest):
     """Run or resume the agent loop, streaming events as Server-Sent Events.
@@ -436,15 +576,30 @@ async def chat_stream(request: ChatStreamRequest):
     read_cols = session["read_cols"]
     write_cols = session["write_cols"]
     decisions = request.decisions
+    memory_facts = _memory_context(request.message)
 
     def event_stream():
-        yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
-        for event in chat_agent.run(provider, messages, read_cols, write_cols, decisions):
-            yield f"data: {json.dumps(event, default=str)}\n\n"
+        yield f"data: {json.dumps({'type': 'session', 'session_id': session_id}, ensure_ascii=False)}\n\n"
+        model_queue = runtime.model_queue()
+        if model_queue.has_pending_work():
+            yield (
+                f"data: {json.dumps({'type': 'queued', 'message': 'Waiting for local memory update.'}, ensure_ascii=False)}\n\n"
+            )
+        with model_queue.chat_turn():
+            for event in chat_agent.run(
+                provider, messages, read_cols, write_cols, decisions, memory_facts
+            ):
+                if event.get("type") == "done" and request.message and event.get("content"):
+                    model_queue.enqueue_extraction(
+                        lambda user_message=request.message, assistant_message=event["content"]: _extract_memory_facts(
+                            provider, user_message, assistant_message
+                        )
+                    )
+                yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
 
     return StreamingResponse(
         event_stream(),
-        media_type="text/event-stream",
+        media_type="text/event-stream; charset=utf-8",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 

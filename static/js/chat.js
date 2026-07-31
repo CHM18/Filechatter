@@ -14,6 +14,9 @@ const chatPanel = {
   sessionId: null,
   busy: false,
   currentTurn: null, // {contentEl, toolCards: {id: el}}
+  models: [],
+  modelsKey: null,
+  modelsLoading: null,
 
   async init() {
     document.getElementById("chat-form").addEventListener("submit", (e) => {
@@ -29,9 +32,9 @@ const chatPanel = {
     document.getElementById("chat-provider").addEventListener("change", (e) => {
       const base = PROVIDER_DEFAULTS[e.target.value];
       if (base) document.getElementById("chat-base-url").value = base;
-      this.saveEndpoint();
+      this.updateEndpointAndModels();
     });
-    document.getElementById("chat-base-url").addEventListener("change", () => this.saveEndpoint());
+    document.getElementById("chat-base-url").addEventListener("change", () => this.updateEndpointAndModels());
     document.getElementById("chat-model").addEventListener("change", () => this.saveEndpoint());
     document.getElementById("chat-refresh-models").addEventListener("click", () => this.loadModels());
     document.getElementById("chat-test").addEventListener("click", () => this.testConnection());
@@ -46,6 +49,7 @@ const chatPanel = {
       ]);
       this.renderEndpoint();
       this.renderDbSelectors();
+      await this.loadModels();
     } catch (error) {
       showToast(`Failed to load chat config: ${error.message}`);
     }
@@ -57,8 +61,20 @@ const chatPanel = {
     const llm = this.settings.llm;
     document.getElementById("chat-provider").value = llm.provider in PROVIDER_DEFAULTS ? llm.provider : "openai_compat";
     document.getElementById("chat-base-url").value = llm.base_url || "";
+    this.renderModelOptions(llm.model);
+  },
+
+  modelKey() {
+    return `${document.getElementById("chat-provider").value}|${document.getElementById("chat-base-url").value.trim()}`;
+  },
+
+  renderModelOptions(selectedModel) {
     const modelSelect = document.getElementById("chat-model");
-    modelSelect.innerHTML = `<option value="${escapeHtml(llm.model)}">${escapeHtml(llm.model)}</option>`;
+    const models = [...new Set([selectedModel, ...this.models].filter(Boolean))];
+    modelSelect.innerHTML = models
+      .map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`)
+      .join("");
+    modelSelect.value = selectedModel;
   },
 
   async saveEndpoint() {
@@ -71,30 +87,52 @@ const chatPanel = {
     };
     try {
       this.settings = await api.updateSettings(changes);
+      if (this.modelsKey !== this.modelKey()) {
+        this.models = [];
+        this.modelsKey = null;
+      }
       app.refreshStatus();
     } catch (error) {
       showToast(`Could not save endpoint: ${error.message}`);
     }
   },
 
+  async updateEndpointAndModels() {
+    await this.saveEndpoint();
+    await this.loadModels();
+  },
+
   async loadModels() {
+    const key = this.modelKey();
+    if (this.modelsKey === key && this.models.length) {
+      this.renderModelOptions(this.settings.llm.model);
+      return;
+    }
+    if (this.modelsLoading) return this.modelsLoading;
+
     const status = document.getElementById("chat-endpoint-status");
     status.textContent = "Loading models…";
     status.className = "endpoint-status";
-    try {
-      await this.saveEndpoint(); // persist base_url first so the server queries the right host
+    this.modelsLoading = (async () => {
+      try {
+        await this.saveEndpoint(); // persist base_url first so the server queries the right host
       const models = (await api.listModels()).models || [];
-      const select = document.getElementById("chat-model");
       const current = this.settings.llm.model;
-      select.innerHTML = models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
-      if (models.includes(current)) select.value = current;
-      else if (models.length) this.saveEndpoint();
-      status.textContent = `${models.length} model(s) available`;
-      status.classList.add("ok");
-    } catch (error) {
-      status.textContent = error.message;
-      status.classList.add("err");
-    }
+        this.models = models;
+        this.modelsKey = key;
+        const selectedModel = models.includes(current) ? current : (models[0] || current);
+        this.renderModelOptions(selectedModel);
+        if (selectedModel !== current) await this.saveEndpoint();
+        status.textContent = `${models.length} model(s) available`;
+        status.classList.add("ok");
+      } catch (error) {
+        status.textContent = error.message;
+        status.classList.add("err");
+      } finally {
+        this.modelsLoading = null;
+      }
+    })();
+    return this.modelsLoading;
   },
 
   async testConnection() {
@@ -240,9 +278,14 @@ const chatPanel = {
       case "session":
         this.sessionId = event.session_id;
         break;
+      case "queued":
+        turn.contentEl.textContent = event.message;
+        turn.contentEl.classList.add("chat-queued");
+        break;
       case "token":
         turn.raw += event.text;
         turn.contentEl.textContent = turn.raw;
+        turn.contentEl.classList.remove("chat-queued");
         this.scroll();
         break;
       case "tool_call":
@@ -258,6 +301,7 @@ const chatPanel = {
       case "done":
         if (!turn.raw.trim() && event.content) turn.raw = event.content;
         turn.contentEl.innerHTML = renderMarkdown(turn.raw);
+        turn.contentEl.classList.remove("chat-queued");
         this.renderSources();
         break;
       case "error":

@@ -150,6 +150,32 @@ h3 { margin-top: 0; }
 
 .collection-actions { grid-column: 2; grid-row: 1 / span 3; align-self: center; }
 
+/* ---------- Memory ---------- */
+
+.memory-list { display: flex; flex-direction: column; gap: 0.65rem; margin-top: 0.8rem; }
+.memory-row {
+  display: flex;
+  gap: 0.8rem;
+  align-items: start;
+  padding: 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.memory-row.disabled { opacity: 0.6; }
+.memory-fields { display: grid; grid-template-columns: 140px 1fr; gap: 0.55rem; flex: 1; min-width: 0; }
+.memory-fields select, .memory-fields textarea {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.memory-fields textarea { resize: vertical; }
+.memory-controls { display: flex; align-items: center; gap: 0.4rem; padding-top: 0.1rem; }
+
 .ext-tag {
   display: inline-block;
   background: var(--bg);
@@ -184,6 +210,9 @@ h3 { margin-top: 0; }
 
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn-primary:hover { background: var(--accent-hover); }
+
+.btn-reset { color: var(--text-dim); }
+.btn-reset:hover { color: var(--text); }
 
 .btn-danger { background: var(--err); border-color: var(--err); color: #fff; }
 .btn-danger:hover { opacity: 0.9; }
@@ -403,6 +432,7 @@ dialog fieldset legend { display: flex; justify-content: space-between; align-it
 .chat-bubble.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
 .chat-bubble.assistant { align-self: flex-start; background: var(--bg); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
 .assistant-text { white-space: pre-wrap; }
+.chat-queued { color: var(--text-dim); font-size: 0.88rem; font-style: italic; }
 .chat-error { color: var(--err); font-size: 0.88rem; margin-top: 0.4rem; }
 .assistant-text code { background: var(--bg); padding: 0 0.25rem; border-radius: 3px; font-size: 0.9em; }
 .md-code {
@@ -488,9 +518,24 @@ dialog fieldset legend { display: flex; justify-content: space-between; align-it
   color: var(--text);
   font: inherit;
 }
+.chat-input .btn { align-self: stretch; white-space: nowrap; }
+.chat-input .btn-send {
+  min-width: 7.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  font-weight: 600;
+}
+.send-icon { font-size: 1.05em; line-height: 1; }
 
 @media (max-width: 720px) {
   .chat-layout { grid-template-columns: 1fr; height: auto; }
+  .memory-row, .memory-fields { grid-template-columns: 1fr; flex-direction: column; }
+  .memory-controls { align-self: flex-end; }
+  .chat-input { flex-wrap: wrap; }
+  .chat-input textarea { flex-basis: 100%; }
+  .chat-input .btn { flex: 1; }
 }
 
 /* ---------- Toast ---------- */

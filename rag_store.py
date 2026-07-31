@@ -376,45 +376,76 @@ class RagStore:
             candidates.append(self._row_ids[faiss_index])
         return candidates
 
-    def _keyword_candidates(self, question: str) -> list[int]:
+    def _keyword_candidates(self, question: str) -> tuple[list[int], list[int]]:
+        """Return body-text and source-path candidates separately.
+
+        The source path contains filename and directory metadata, which is a
+        stronger retrieval signal than an incidental body-text match.
+        """
         terms = _extract_terms(question)
-        candidates: list[int] = []
+        content_candidates: list[int] = []
+        source_candidates: list[int] = []
 
         if terms:
             match_query = " OR ".join(f'"{term}"' for term in terms)
-            rows = self._connection.execute(
+            content_rows = self._connection.execute(
                 """
                 SELECT rowid
                 FROM chunks_fts
-                WHERE chunks_fts MATCH ?
+                WHERE chunks_fts MATCH 'content : (' || ? || ')'
                 ORDER BY bm25(chunks_fts)
                 LIMIT ?
                 """,
                 (match_query, config.KEYWORD_RETRIEVAL_K),
             ).fetchall()
-            candidates.extend(row["rowid"] for row in rows)
+            content_candidates.extend(row["rowid"] for row in content_rows)
+            source_rows = self._connection.execute(
+                """
+                SELECT rowid
+                FROM chunks_fts
+                WHERE chunks_fts MATCH 'source : (' || ? || ')'
+                ORDER BY bm25(chunks_fts)
+                LIMIT ?
+                """,
+                (match_query, config.KEYWORD_RETRIEVAL_K),
+            ).fetchall()
+            source_candidates.extend(row["rowid"] for row in source_rows)
 
         phrase = question.strip()
         if phrase:
-            like_rows = self._connection.execute(
+            content_rows = self._connection.execute(
                 """
                 SELECT id
                 FROM chunks
-                WHERE content LIKE ? COLLATE NOCASE OR source LIKE ? COLLATE NOCASE
+                WHERE content LIKE ? COLLATE NOCASE
                 ORDER BY source ASC, chunk_index ASC
                 LIMIT ?
                 """,
-                (f"%{phrase}%", f"%{phrase}%", config.KEYWORD_RETRIEVAL_K),
+                (f"%{phrase}%", config.KEYWORD_RETRIEVAL_K),
             ).fetchall()
-            candidates.extend(row["id"] for row in like_rows)
+            content_candidates.extend(row["id"] for row in content_rows)
+            source_rows = self._connection.execute(
+                """
+                SELECT id
+                FROM chunks
+                WHERE source LIKE ? COLLATE NOCASE
+                ORDER BY source ASC, chunk_index ASC
+                LIMIT ?
+                """,
+                (f"%{phrase}%", config.KEYWORD_RETRIEVAL_K),
+            ).fetchall()
+            source_candidates.extend(row["id"] for row in source_rows)
 
-        deduped: list[int] = []
-        seen: set[int] = set()
-        for chunk_id in candidates:
-            if chunk_id not in seen:
-                seen.add(chunk_id)
-                deduped.append(chunk_id)
-        return deduped
+        def dedupe(candidates: list[int]) -> list[int]:
+            deduped: list[int] = []
+            seen: set[int] = set()
+            for chunk_id in candidates:
+                if chunk_id not in seen:
+                    seen.add(chunk_id)
+                    deduped.append(chunk_id)
+            return deduped
+
+        return dedupe(content_candidates), dedupe(source_candidates)
 
     def _chunk_document(self, text: str) -> list[tuple[str, int, int]]:
         normalized_text = text.replace("\r\n", "\n")
@@ -592,7 +623,7 @@ class RagStore:
                 return []
 
             semantic_candidates = self._semantic_candidates(normalized_question)
-            keyword_candidates = self._keyword_candidates(normalized_question)
+            keyword_candidates, metadata_candidates = self._keyword_candidates(normalized_question)
 
             reciprocal_rank_offset = 60
             combined_scores: dict[int, float] = {}
@@ -605,6 +636,11 @@ class RagStore:
             for rank, chunk_id in enumerate(keyword_candidates, start=1):
                 combined_scores[chunk_id] = combined_scores.get(chunk_id, 0.0) + (
                     config.KEYWORD_WEIGHT / (reciprocal_rank_offset + rank)
+                )
+
+            for rank, chunk_id in enumerate(metadata_candidates, start=1):
+                combined_scores[chunk_id] = combined_scores.get(chunk_id, 0.0) + (
+                    config.METADATA_KEYWORD_WEIGHT / (reciprocal_rank_offset + rank)
                 )
 
             ordered_chunk_ids = [
