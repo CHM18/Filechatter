@@ -32,7 +32,7 @@ from llm_providers import ProviderError
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 8
+REPEATED_TOOL_CALL_LIMIT = 3
 
 # Read tools whose collection_name the agent scopes to the read selection.
 READ_SCOPED_TOOLS = {"search_documents", "list_sources"}
@@ -151,9 +151,31 @@ def _resolve_write_collection(
 
 def _summarize_result(result: Any) -> Any:
     """Trim tool results before sending them back to the model / browser."""
+    if isinstance(result, str):
+        return result if len(result) <= 1200 else result[:1200].rstrip() + "…"
     if isinstance(result, list):
-        return result[:10]
+        return [_summarize_result(item) for item in result[:8]]
+    if isinstance(result, dict):
+        return {key: _summarize_result(value) for key, value in list(result.items())[:20]}
     return result
+
+
+def _tool_call_pattern(calls: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Build a stable signature for a tool-call batch, ignoring transient ids."""
+    pattern: list[str] = []
+    for call in calls:
+        name = str(call.get("function", {}).get("name") or "")
+        raw_args = call.get("function", {}).get("arguments") or "{}"
+        try:
+            parsed_args = json.loads(raw_args)
+            if isinstance(parsed_args, (dict, list)):
+                args_repr = json.dumps(parsed_args, sort_keys=True, ensure_ascii=False)
+            else:
+                args_repr = json.dumps(parsed_args, ensure_ascii=False)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            args_repr = str(raw_args)
+        pattern.append(f"{name}:{args_repr}")
+    return tuple(pattern)
 
 
 def run(
@@ -169,6 +191,7 @@ def run(
       {"type": "token", "text": str}
       {"type": "tool_call", "id","name","arguments"}
       {"type": "tool_result", "id","name","ok":bool,"result":Any}
+            {"type": "usage", "usage": Any}
       {"type": "need_confirmation", "pending":[{id,name,arguments,kind,options?}]}
       {"type": "done", "content": str}
       {"type": "error", "message": str}
@@ -181,11 +204,31 @@ def run(
     if not messages or messages[0].get("role") != "system":
         messages.insert(0, {"role": "system", "content": _system_prompt(read_cols, write_cols)})
 
+    last_pattern: tuple[str, ...] | None = None
+    repeated_pattern_count = 0
+
     try:
-        for _iteration in range(MAX_ITERATIONS):
+        while True:
             pending = _tool_calls_needing_results(messages)
 
             if pending:
+                pattern = _tool_call_pattern(pending)
+                if pattern == last_pattern:
+                    repeated_pattern_count += 1
+                else:
+                    last_pattern = pattern
+                    repeated_pattern_count = 1
+
+                if repeated_pattern_count >= REPEATED_TOOL_CALL_LIMIT:
+                    yield {
+                        "type": "error",
+                        "message": (
+                            "Stopped after 3 repeated tool-call rounds "
+                            "without a final answer."
+                        ),
+                    }
+                    return
+
                 confirmations: list[dict[str, Any]] = []
                 for call in pending:
                     name = call["function"]["name"]
@@ -254,6 +297,8 @@ def run(
             for kind, value in provider.stream(messages, tools or None):
                 if kind == "token":
                     yield {"type": "token", "text": value}
+                elif kind == "usage":
+                    yield {"type": "usage", "usage": value}
                 elif kind == "message":
                     assistant_message = value
             messages.append(assistant_message)
@@ -262,8 +307,6 @@ def run(
                 continue  # resolved on the next iteration
             yield {"type": "done", "content": assistant_message.get("content", "")}
             return
-
-        yield {"type": "error", "message": "Reached the tool-call limit without a final answer."}
 
     except ProviderError as exc:
         yield {"type": "error", "message": str(exc)}

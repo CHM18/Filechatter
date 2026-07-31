@@ -6,6 +6,8 @@ frontend through the REST API, so no other process ever opens the data files.
 """
 import json
 import uuid
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from contextlib import asynccontextmanager
@@ -34,6 +36,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+_MODEL_CACHE_TTL_SECONDS = 60
+_MODEL_CACHE_LOCK = threading.Lock()
+_MODEL_CACHE: dict[tuple[str, str, str], tuple[float, list[str]]] = {}
 
 
 @asynccontextmanager
@@ -87,6 +92,21 @@ def _list_sources(collection_name: str) -> list[dict[str, Any]]:
 
 def _total_chunks(collection_name: str) -> int:
     return sum(store.chunk_count for store in runtime.collections().selected_stores(collection_name))
+
+
+def _cached_model_list(llm_settings: dict[str, Any], force: bool = False) -> list[str]:
+    provider = build_provider(llm_settings)
+    cache_key = (provider.base_url, provider.api_key or "", provider.model)
+    now = time.monotonic()
+    with _MODEL_CACHE_LOCK:
+        cached = _MODEL_CACHE.get(cache_key)
+        if not force and cached and (now - cached[0]) < _MODEL_CACHE_TTL_SECONDS:
+            return list(cached[1])
+
+    models = provider.list_models()
+    with _MODEL_CACHE_LOCK:
+        _MODEL_CACHE[cache_key] = (now, list(models))
+    return models
 
 
 lm_client = LMStudioChatClient(
@@ -367,11 +387,10 @@ async def set_permissions(request: PermissionsUpdateRequest):
 
 
 @app.get("/llm/models")
-async def llm_models():
+async def llm_models(force: bool = False):
     """List models advertised by the configured endpoint (for the UI picker)."""
-    provider = build_provider(runtime.settings().get()["llm"])
     try:
-        return {"models": provider.list_models()}
+        return {"models": _cached_model_list(runtime.settings().get()["llm"], force=force)}
     except ProviderError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
