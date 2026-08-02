@@ -36,7 +36,13 @@ class ChatSessionStore:
 
     def create(self, session_id: str, read_cols: list[str], write_cols: list[str]) -> dict[str, Any]:
         with self._lock:
-            session = {"messages": [], "read_cols": read_cols, "write_cols": write_cols}
+            session = {
+                "messages": [],
+                "read_cols": read_cols,
+                "write_cols": write_cols,
+                "cancel_event": threading.Event(),
+                "active_streams": 0,
+            }
             self._sessions[session_id] = session
             return session
 
@@ -47,6 +53,34 @@ class ChatSessionStore:
     def delete(self, session_id: str) -> None:
         with self._lock:
             self._sessions.pop(session_id, None)
+
+    def begin_stream(self, session_id: str) -> threading.Event | None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return None
+            cancel_event = session["cancel_event"]
+            cancel_event.clear()
+            session["active_streams"] = int(session.get("active_streams", 0)) + 1
+            return cancel_event
+
+    def end_stream(self, session_id: str) -> None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return
+            active = int(session.get("active_streams", 0))
+            session["active_streams"] = max(0, active - 1)
+
+    def cancel(self, session_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return False
+            if int(session.get("active_streams", 0)) <= 0:
+                return False
+            session["cancel_event"].set()
+            return True
 
 
 class LocalModelQueue:

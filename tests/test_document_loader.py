@@ -79,7 +79,7 @@ class TestSupportAndCatalog:
     def test_catalog_has_categories(self):
         catalog = dl.file_type_catalog()
         names = {c["category"] for c in catalog}
-        assert {"Office", "Text", "Web", "Code"}.issubset(names)
+        assert {"Office", "Images", "Text", "Web", "Code"}.issubset(names)
 
     def test_catalog_reports_availability(self):
         catalog = {c["category"]: c for c in dl.file_type_catalog()}
@@ -94,8 +94,20 @@ class TestSupportAndCatalog:
         assert support[".md"]["available"] is True
         assert support[".py"]["category"] == "Code"
 
-    def test_unsupported_extension_rejected(self, tmp_path):
+    def test_image_uses_vision_and_exif_pipeline(self, tmp_path, monkeypatch):
         path = tmp_path / "image.png"
-        path.write_bytes(b"\x89PNG")
+        path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        monkeypatch.setattr(dl, "_summarize_image_with_llm", lambda _path: "A scenic mountain view.")
+        monkeypatch.setattr(dl, "_extract_image_exif", lambda _path: {"Make": "Canon"})
+
+        loaded = dl.load_document(path)
+        assert "A scenic mountain view." in loaded.content
+        assert loaded.metadata["content_kind"] == "image"
+        assert loaded.metadata["image_exif"]["Make"] == "Canon"
+
+    def test_unsupported_extension_rejected(self, tmp_path):
+        path = tmp_path / "blob.bin"
+        path.write_bytes(b"\x00\x01\x02")
         with pytest.raises(ValueError, match="Unsupported"):
             dl.load_document(path)

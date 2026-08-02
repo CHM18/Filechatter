@@ -17,6 +17,10 @@ def _resolve_path(value: str) -> str:
     return str(path.resolve())
 
 
+def _csv_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 load_dotenv(BASE_DIR / ".env")
 
 # Set Sentence Transformers cache to local llmodels directory
@@ -38,7 +42,21 @@ DATA_DIR = _resolve_path(os.getenv("DATA_DIR", "./data"))
 
 # RAG Parameters
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
-LM_STUDIO_TIMEOUT = int(os.getenv("LM_STUDIO_TIMEOUT", "60"))
+LM_STUDIO_TIMEOUT = int(os.getenv("LM_STUDIO_TIMEOUT", "300"))
+
+# Image analysis (used when ingesting photo files as normal documents)
+IMAGE_VISION_BASE_URL = os.getenv("IMAGE_VISION_BASE_URL", LM_STUDIO_BASE_URL)
+IMAGE_VISION_MODEL = os.getenv("IMAGE_VISION_MODEL", LM_STUDIO_MODEL)
+IMAGE_VISION_API_KEY = os.getenv("IMAGE_VISION_API_KEY", "")
+IMAGE_VISION_TIMEOUT = int(os.getenv("IMAGE_VISION_TIMEOUT", str(LM_STUDIO_TIMEOUT)))
+IMAGE_VISION_MAX_TOKENS = int(os.getenv("IMAGE_VISION_MAX_TOKENS", "350"))
+IMAGE_EXIF_FIELDS = _csv_list(
+    os.getenv(
+        "IMAGE_EXIF_FIELDS",
+        "DateTimeOriginal,Make,Model,LensModel,FNumber,ExposureTime,ISOSpeedRatings,FocalLength,GPSInfo",
+    )
+)
+
 CHUNK_SIZE_CHARS = int(os.getenv("CHUNK_SIZE_CHARS", "1800"))
 CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "250"))
 CHUNK_SPLIT_MARGIN = int(os.getenv("CHUNK_SPLIT_MARGIN", "400"))

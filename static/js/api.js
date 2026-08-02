@@ -66,12 +66,9 @@ const api = {
     });
   },
 
-  testEndpoint() {
-    return this.request("/llm/test", { method: "POST" });
-  },
-
-  listModels() {
-    return this.request("/llm/models");
+  listModels(force = false) {
+    const query = force ? "?force=true" : "";
+    return this.request(`/llm/models${query}`);
   },
 
   listMemories() {
@@ -90,11 +87,26 @@ const api = {
     return this.request("/memories?confirm=true", { method: "DELETE" });
   },
 
+  executeTool(name, toolArguments = {}) {
+    return this.request(`/tools/${encodeURIComponent(name)}`, {
+      method: "POST",
+      body: JSON.stringify({ arguments: toolArguments }),
+    });
+  },
+
+  cancelChat(sessionId) {
+    return this.request("/chat/cancel", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+  },
+
   // Stream chat events. `onEvent(evt)` is called per SSE event; resolves when the stream ends.
-  async streamChat(body, onEvent) {
+  async streamChat(body, onEvent, options = {}) {
     const response = await fetch("/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: options.signal,
       body: JSON.stringify(body),
     });
     if (!response.ok) {

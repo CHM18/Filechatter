@@ -55,6 +55,7 @@ class TestVisibility:
     def test_all_visible_by_default(self, data_env):
         names = permissions.visible_tool_names()
         assert len(names) == 8
+        assert {"search_documents", "list_sources", "ingest_file", "start_ingest_directory", "clear_index"}.issubset(names)
 
     def test_unknown_tool_raises(self, data_env):
         with pytest.raises(KeyError):

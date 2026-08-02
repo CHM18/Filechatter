@@ -206,6 +206,10 @@ class ChatStreamRequest(BaseModel):
     decisions: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatCancelRequest(BaseModel):
+    session_id: str
+
+
 class MemoryCreateRequest(BaseModel):
     category: str
     fact: str
@@ -577,31 +581,56 @@ async def chat_stream(request: ChatStreamRequest):
     write_cols = session["write_cols"]
     decisions = request.decisions
     memory_facts = _memory_context(request.message)
+    cancel_event = store.begin_stream(session_id)
+    if cancel_event is None:
+        raise HTTPException(status_code=404, detail="Unknown chat session.")
 
     def event_stream():
-        yield f"data: {json.dumps({'type': 'session', 'session_id': session_id}, ensure_ascii=False)}\n\n"
-        model_queue = runtime.model_queue()
-        if model_queue.has_pending_work():
-            yield (
-                f"data: {json.dumps({'type': 'queued', 'message': 'Waiting for local memory update.'}, ensure_ascii=False)}\n\n"
-            )
-        with model_queue.chat_turn():
-            for event in chat_agent.run(
-                provider, messages, read_cols, write_cols, decisions, memory_facts
-            ):
-                if event.get("type") == "done" and request.message and event.get("content"):
-                    model_queue.enqueue_extraction(
-                        lambda user_message=request.message, assistant_message=event["content"]: _extract_memory_facts(
-                            provider, user_message, assistant_message
+        try:
+            yield f"data: {json.dumps({'type': 'session', 'session_id': session_id}, ensure_ascii=False)}\n\n"
+            model_queue = runtime.model_queue()
+            if model_queue.has_pending_work():
+                yield (
+                    f"data: {json.dumps({'type': 'queued', 'message': 'Waiting for local memory update.'}, ensure_ascii=False)}\n\n"
+                )
+            with model_queue.chat_turn():
+                for event in chat_agent.run(
+                    provider,
+                    messages,
+                    read_cols,
+                    write_cols,
+                    decisions,
+                    memory_facts,
+                    cancel_event=cancel_event,
+                ):
+                    if event.get("type") == "done" and request.message and event.get("content"):
+                        model_queue.enqueue_extraction(
+                            lambda user_message=request.message, assistant_message=event["content"]: _extract_memory_facts(
+                                provider, user_message, assistant_message
+                            )
                         )
-                    )
-                yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+                    yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+        finally:
+            store.end_stream(session_id)
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream; charset=utf-8",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/chat/cancel")
+async def chat_cancel(request: ChatCancelRequest):
+    """Request cancellation of an active streamed chat turn."""
+    cancelled = runtime.chat_sessions().cancel(request.session_id)
+    if cancelled:
+        return {"status": "success", "session_id": request.session_id}
+    return {
+        "status": "idle",
+        "session_id": request.session_id,
+        "message": "No active generation for this session.",
+    }
 
 
 # ----------------------------------------------------------------------

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any, Iterator
 from urllib.parse import urlparse
 
@@ -30,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 class ProviderError(RuntimeError):
     """Raised when the LLM endpoint is unreachable or returns an error."""
+
+
+class ProviderCancelled(ProviderError):
+    """Raised when generation is intentionally interrupted by the user."""
 
 
 def _normalize_base_url(base_url: str | None) -> str:
@@ -105,9 +110,15 @@ class OpenAICompatProvider:
         return [m for m in models if m]
 
     def stream(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Iterator[tuple[str, Any]]:
         base_url = self._require_base_url()
+        if cancel_event is not None and cancel_event.is_set():
+            raise ProviderCancelled("Generation stopped by user.")
+
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -134,11 +145,26 @@ class OpenAICompatProvider:
             detail = response.text[:500]
             raise ProviderError(f"LLM returned HTTP {response.status_code}: {detail}")
 
+        stop_watcher_done = threading.Event()
+        if cancel_event is not None:
+            def _watch_cancel() -> None:
+                cancel_event.wait()
+                if stop_watcher_done.is_set():
+                    return
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
+            threading.Thread(target=_watch_cancel, name="llm-cancel-watch", daemon=True).start()
+
         content_parts: list[str] = []
         tool_calls: dict[int, dict[str, Any]] = {}
 
         try:
             for raw_line in response.iter_lines(decode_unicode=True):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ProviderCancelled("Generation stopped by user.")
                 if not raw_line or not raw_line.startswith("data:"):
                     continue
                 data = raw_line[len("data:") :].strip()
@@ -174,13 +200,23 @@ class OpenAICompatProvider:
                     if function.get("arguments"):
                         accumulator["arguments"] += function["arguments"]
         except requests.exceptions.ReadTimeout as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ProviderCancelled("Generation stopped by user.") from exc
             _, read_timeout = self._stream_timeout()
             raise ProviderError(
                 "LLM response timed out while waiting for streamed tokens "
                 f"(read-timeout={read_timeout}s). Increase llm.timeout_seconds in settings."
             ) from exc
         except requests.exceptions.RequestException as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ProviderCancelled("Generation stopped by user.") from exc
             raise ProviderError(f"Could not read streamed response from {base_url}: {exc}") from exc
+        finally:
+            stop_watcher_done.set()
+            try:
+                response.close()
+            except Exception:
+                pass
 
         message: dict[str, Any] = {
             "role": "assistant",

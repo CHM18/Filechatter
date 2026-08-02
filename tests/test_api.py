@@ -313,6 +313,23 @@ class TestChatStreamApi:
         monkeypatch.setattr("rag_server.build_provider", lambda _llm: Ok())
         assert client.get("/llm/models").json()["models"] == ["qwen", "llama"]
 
+    def test_chat_cancel_idle_for_unknown_session(self, client):
+        payload = client.post("/chat/cancel", json={"session_id": "missing"}).json()
+        assert payload["status"] == "idle"
+
+    def test_chat_cancel_active_session(self, client):
+        import runtime
+
+        session_id = "session-cancel"
+        runtime.chat_sessions().create(session_id, [], [])
+        runtime.chat_sessions().begin_stream(session_id)
+
+        payload = client.post("/chat/cancel", json={"session_id": session_id}).json()
+        assert payload["status"] == "success"
+        assert runtime.chat_sessions().get(session_id)["cancel_event"].is_set() is True
+
+        runtime.chat_sessions().end_stream(session_id)
+
 
 class TestMemoryApi:
     def test_memory_crud(self, client):

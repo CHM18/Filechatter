@@ -43,7 +43,6 @@
                 <button type="button" class="btn btn-small" id="chat-refresh-models" title="Reload model list">⟳</button>
               </span>
             </label>
-            <button type="button" class="btn btn-small" id="chat-test">Test connection</button>
             <div id="chat-endpoint-status" class="endpoint-status"></div>
           </div>
 
@@ -64,9 +63,10 @@
           <form id="chat-form" class="chat-input">
             <button type="button" class="btn btn-reset" id="chat-reset">New conversation</button>
             <textarea id="chat-text" rows="2" placeholder="Ask about your documents…  (Enter to send, Shift+Enter for newline)"></textarea>
+            <button type="button" class="btn" id="chat-stop" disabled>Stop</button>
             <button type="submit" class="btn btn-primary btn-send" id="chat-send">
               <span class="send-icon" aria-hidden="true">&#9992;</span>
-              <span>Send</span>
+              <span class="send-label">Send</span>
             </button>
           </form>
         </div>

@@ -37,7 +37,7 @@ cd Filechatter
 ```
 2. after virtual environment was set up (second start, faster!)
 ```bash
-filechatter\Scripts\activate.ps1
+.venv_filechatter\Scripts\activate.ps1
 python ./rag_server.py
 ```
 
@@ -62,7 +62,7 @@ Desktop and Microsoft Copilot are not chat targets here - they connect to Filech
 MCP hosts, and the web UI is their administration console.
 
 Configure the endpoint in the Chat sidebar (provider, base URL, model) and press
-**Test connection**. Then:
+**Reload models** (⟳). Then:
 
 - **Read from / Write to** - tick which databases each message may read and write. Reads
   are scoped to the selected databases automatically (the model never has to name one).
@@ -136,10 +136,10 @@ winget install Python.Python.3.12
 ```
 2. Create a virtual environment:
 ```bash
-py -m venv filechatter
+py -m venv .venv_filechatter
 # On Windows
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
-filechatter\Scripts\activate.ps1
+.venv_filechatter\Scripts\activate.ps1
 # On macOS/Linux
 source venv/bin/activate
 ```
@@ -160,7 +160,7 @@ Make sure the Filechatter server is running first (`.\rag.ps1`), then run the MC
 
 ```bash
 # On Windows
-filechatter\Scripts\python.exe rag_mcp_server.py
+.venv_filechatter\Scripts\python.exe rag_mcp_server.py
 # On macOS/Linux
 python rag_mcp_server.py
 ```
@@ -171,7 +171,7 @@ Add it to LM Studio in `mcp.json` as a local program. Example Windows configurat
 {
   "mcpServers": {
     "filechatter": {
-      "command": "C:\\Users\\post\\Desktop\\Dateien_KI\\Filechatter\\venv\\Scripts\\python.exe",
+      "command": "C:\\Users\\post\\Desktop\\Dateien_KI\\Filechatter\\.venv_filechatter\\Scripts\\python.exe",
       "args": [
         "C:\\Users\\post\\Desktop\\Dateien_KI\\Filechatter\\rag_mcp_server.py"
       ]
@@ -233,7 +233,7 @@ Recommended workflow for large ingests:
 #### Upload a document:
 ```bash
 # On Windows
-venv\Scripts\python.exe -m cli upload documents/file.txt
+.venv_filechatter\Scripts\python.exe -m cli upload documents/file.txt
 # On macOS/Linux
 python -m cli upload documents/file.txt
 ```
@@ -241,21 +241,24 @@ python -m cli upload documents/file.txt
 #### Upload all supported documents from a directory recursively:
 ```bash
 # On Windows
-venv\Scripts\python.exe -m cli upload-dir ./documents
+.venv_filechatter\Scripts\python.exe -m cli upload-dir ./documents
 # On macOS/Linux
 python -m cli upload-dir ./documents
 ```
 
 Supported file types span several categories:
 
+- **Images**: `jpg`, `jpeg`, `png`, `webp`, `gif`, `bmp`, `tif`, `tiff`, `avif`, `heic`
 - **Office**: `pdf`, `docx`, `doc`, `xlsx`, `pptx`
 - **Text**: `txt`, `md`, `markdown`, `rst`, `csv`, `tsv`, `log`
 - **Web**: `html`, `htm`, `xml`, `css`, `vue`, `svelte`
 - **Data & Config**: `json`, `yaml`, `toml`, `ini`, `cfg`, `conf`
 - **Code**: `py`, `js`, `ts`, `java`, `c`, `cpp`, `go`, `rs`, `rb`, `php`, `sh`, `ps1`, `sql`, and many more
 
-Text, web, data, and code files are read as plain UTF-8; HTML is stripped to text; Excel and
-PowerPoint need the optional `openpyxl` / `python-pptx` dependencies (installed via
+Image files are summarized through a vision model and stored together with selected EXIF fields;
+the summary also includes file/folder-name context for better retrieval. Text, web, data, and
+code files are read as plain UTF-8; HTML is stripped to text; Excel and PowerPoint need the
+optional `openpyxl` / `python-pptx` dependencies (installed via
 `requirements.txt`). When creating a database in the web UI you pick allowed types by category,
 or switch to **Individual types** for per-extension control; leaving everything unselected
 accepts all supported types.
@@ -265,7 +268,7 @@ For legacy `doc` files, Filechatter uses Microsoft Word automation on Windows wh
 #### Compatibility chat endpoint:
 ```bash
 # On Windows
-venv\Scripts\python.exe -m cli chat "What does the document say about X?"
+.venv_filechatter\Scripts\python.exe -m cli chat "What does the document say about X?"
 # On macOS/Linux
 python -m cli chat "What does the document say about X?"
 ```
@@ -275,7 +278,7 @@ This path still works, but the preferred workflow is to chat in LM Studio and le
 #### Check server status:
 ```bash
 # On Windows
-venv\Scripts\python.exe -m cli status
+.venv_filechatter\Scripts\python.exe -m cli status
 # On macOS/Linux
 python -m cli status
 ```
@@ -283,7 +286,7 @@ python -m cli status
 #### List all documents:
 ```bash
 # On Windows
-venv\Scripts\python.exe -m cli list-docs
+.venv_filechatter\Scripts\python.exe -m cli list-docs
 # On macOS/Linux
 python -m cli list-docs
 ```
@@ -291,7 +294,7 @@ python -m cli list-docs
 #### Dump stored chunk content for debugging:
 ```bash
 # On Windows
-venv\Scripts\python.exe -m cli dump-chunks "your-file.docx" --limit 3
+.venv_filechatter\Scripts\python.exe -m cli dump-chunks "your-file.docx" --limit 3
 # On macOS/Linux
 python -m cli dump-chunks "your-file.docx" --limit 3
 ```
@@ -301,7 +304,7 @@ This prints the actual chunk text stored in the RAG index, which is useful when 
 #### Clear all documents:
 ```bash
 # On Windows
-venv\Scripts\python.exe -m cli clear --yes
+.venv_filechatter\Scripts\python.exe -m cli clear --yes
 # On macOS/Linux
 python -m cli clear --yes
 ```
@@ -380,6 +383,12 @@ The server can be configured using environment variables. Copy `.env.example` to
 
 - `LM_STUDIO_URL`: URL of your LM Studio server (default: http://localhost:1234)
 - `LM_STUDIO_MODEL`: Model name to use (default: local-model)
+- `IMAGE_VISION_BASE_URL`: OpenAI-compatible endpoint for image analysis (default: `LM_STUDIO_URL`)
+- `IMAGE_VISION_MODEL`: Model used to summarize images (default: `LM_STUDIO_MODEL`)
+- `IMAGE_VISION_API_KEY`: Optional API key for the vision endpoint
+- `IMAGE_VISION_TIMEOUT`: Timeout for image-analysis requests in seconds
+- `IMAGE_VISION_MAX_TOKENS`: Maximum output tokens for image summaries
+- `IMAGE_EXIF_FIELDS`: Comma-separated EXIF tags to persist when present
 - `DATA_DIR`: Directory for SQLite and FAISS persistence (default: ./data)
 - `CHUNK_SIZE_CHARS`: Chunk size before embedding (default: 1800)
 - `CHUNK_OVERLAP_CHARS`: Overlap between adjacent chunks (default: 250)
@@ -409,7 +418,7 @@ Filechatter/
 ├── settings_manager.py     # Runtime settings (data/settings.json)
 ├── runtime.py              # Process-wide singletons
 ├── rag_store.py            # SQLite + FAISS persistence and retrieval
-├── document_loader.py      # Text extraction for txt, pdf, docx, and doc
+├── document_loader.py      # Text extraction for docs + vision/EXIF summaries for images
 ├── langchain_support.py    # Prompt template, output parsing, LM Studio client
 ├── cli.py                  # CLI for upload, status, and diagnostics
 ├── static/                 # Web UI (vanilla JS, no build step)
@@ -423,9 +432,9 @@ Filechatter/
 
 ```bash
 # Install dev dependencies once
-.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.venv_filechatter\Scripts\python.exe -m pip install -r requirements-dev.txt
 # Run the suite (no LM Studio or embedding model required)
-.venv\Scripts\python.exe -m pytest
+.venv_filechatter\Scripts\python.exe -m pytest
 ```
 
 Tests run against a temporary data directory with a deterministic fake embedding model - they never touch `./data` and need no network access.
@@ -474,6 +483,5 @@ See LICENSE file for details.
 Contributions welcome! Feel free to submit issues and pull requests.
 
 ## To Do
-- One-click-script to start venv and rag_server
+- Replace custommade text splitter by llamaindex (or langchain?) text splitter (more complex but better quality). could solve this 2 pblms as well:
 - make it more robust: when many files are uploaded only some hits are returned for a key-word, not all
-- include description of images into text (so that the LLM can better understand the context), especially images embedded in pdf and docx files

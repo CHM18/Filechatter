@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import json
 import logging
+import inspect
+import threading
 from typing import Any, Iterator
 
 import permissions
 import runtime
 import tool_registry
-from llm_providers import ProviderError
+from llm_providers import ProviderCancelled, ProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +199,7 @@ def run(
     write_cols: list[str],
     decisions: dict[str, Any] | None = None,
     memory_facts: list[str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Run/resume the agent loop, yielding event dicts.
 
@@ -206,6 +209,7 @@ def run(
       {"type": "tool_result", "id","name","ok":bool,"result":Any}
             {"type": "usage", "usage": Any}
       {"type": "need_confirmation", "pending":[{id,name,arguments,kind,options?}]}
+    {"type": "cancelled", "message": str}
       {"type": "done", "content": str}
       {"type": "error", "message": str}
     """
@@ -312,7 +316,13 @@ def run(
 
             # No pending tool calls: get the next assistant turn.
             assistant_message: dict[str, Any] = {"role": "assistant", "content": ""}
-            for kind, value in provider.stream(messages, tools or None):
+            stream_signature = inspect.signature(provider.stream)
+            if "cancel_event" in stream_signature.parameters:
+                stream_iter = provider.stream(messages, tools or None, cancel_event=cancel_event)
+            else:
+                stream_iter = provider.stream(messages, tools or None)
+
+            for kind, value in stream_iter:
                 if kind == "token":
                     yield {"type": "token", "text": value}
                 elif kind == "usage":
@@ -326,6 +336,8 @@ def run(
             yield {"type": "done", "content": assistant_message.get("content", "")}
             return
 
+    except ProviderCancelled as exc:
+        yield {"type": "cancelled", "message": str(exc)}
     except ProviderError as exc:
         yield {"type": "error", "message": str(exc)}
     except Exception as exc:  # pragma: no cover - defensive
