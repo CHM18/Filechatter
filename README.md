@@ -358,6 +358,29 @@ curl -X POST http://localhost:8000/upload \
   }'
 ```
 
+## Optional: Run Ollama locally via Docker
+
+`ollama-docker/setup-ollama.sh` builds a small Ubuntu-based Docker image with
+[Ollama](https://ollama.com) and starts it as a local, OpenAI-compatible chat endpoint you can
+point Filechatter at (as an alternative to LM Studio). Run it from a bash shell (e.g. WSL2 on
+Windows):
+
+```bash
+bash ollama-docker/setup-ollama.sh
+```
+
+The script:
+
+- Builds the Docker image and (re)creates the `ollama-container` container, persisting models
+  under `~/ollama`
+- Detects an NVIDIA GPU on the host and, if found, installs the NVIDIA Container Toolkit if
+  missing, generates the CDI spec needed for `--gpus all` (with WSL2-aware mode when running
+  under WSL2), and verifies GPU access end-to-end before enabling it - falling back to CPU-only
+  automatically if any step fails
+- Waits for the Ollama API to become healthy, confirms the GPU is active inside the running
+  container, then pulls the configured model (`nemotron-3-nano:4b` by default) and starts an
+  interactive chat session
+
 ## Architecture
 
 ```
