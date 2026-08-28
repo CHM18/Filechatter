@@ -42,14 +42,14 @@ DATA_DIR = _resolve_path(os.getenv("DATA_DIR", "./data"))
 
 # RAG Parameters
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
-LM_STUDIO_TIMEOUT = int(os.getenv("LM_STUDIO_TIMEOUT", "300"))
+LM_STUDIO_TIMEOUT = int(os.getenv("LM_STUDIO_TIMEOUT", "600"))
 
 # Image analysis (used when ingesting photo files as normal documents)
 IMAGE_VISION_BASE_URL = os.getenv("IMAGE_VISION_BASE_URL", LM_STUDIO_BASE_URL)
 IMAGE_VISION_MODEL = os.getenv("IMAGE_VISION_MODEL", LM_STUDIO_MODEL)
 IMAGE_VISION_API_KEY = os.getenv("IMAGE_VISION_API_KEY", "")
 IMAGE_VISION_TIMEOUT = int(os.getenv("IMAGE_VISION_TIMEOUT", str(LM_STUDIO_TIMEOUT)))
-IMAGE_VISION_MAX_TOKENS = int(os.getenv("IMAGE_VISION_MAX_TOKENS", "350"))
+IMAGE_VISION_MAX_TOKENS = int(os.getenv("IMAGE_VISION_MAX_TOKENS", "1500"))
 IMAGE_EXIF_FIELDS = _csv_list(
     os.getenv(
         "IMAGE_EXIF_FIELDS",
