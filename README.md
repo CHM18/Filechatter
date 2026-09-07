@@ -511,4 +511,7 @@ Contributions welcome! Feel free to submit issues and pull requests.
 - Add architectural details to source code project (dependency graph, classes...) so that the model gets a better overview
 - make foto ingestion more meaningful, e.g. by multiple passes so that the llm learns who shown in the picture via meta data (and some guessing). Alternative: provide golden samples with persons taked with their names. Further: add a way to provide context information, e.g. birth dates, so that a birthday party can be assigned to a specific person...
 - add the possibility to configure cron-jobs for ingestion runs per collection
-
+- make the retrieval characteristics adjustable per collection, e.g. (copilot suggestion):
+  - source code: semantic 0.75, keyword 2.5, metadata 6
+  - prose:       semantic 2.0,  keyword 1.0, metadata 3
+  - photos:      semantic 2.0,  keyword 1.0, metadata 4
