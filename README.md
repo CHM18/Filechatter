@@ -506,5 +506,9 @@ See LICENSE file for details.
 Contributions welcome! Feel free to submit issues and pull requests.
 
 ## To Do
-- Replace custommade text splitter by llamaindex (or langchain?) text splitter (more complex but better quality). could solve this 2 pblms as well:
-- make it more robust: when many files are uploaded only some hits are returned for a key-word, not all
+- Replace custommade text splitter by llamaindex (or langchain?) text splitter (more complex but better quality). could solve this pblm as well: make it more robust: when many files are uploaded only some hits are returned for a key-word, not all
+- make the collection selection wired through to the backend (currently only the chat via web-UI respects them)
+- Add architectural details to source code project (dependency graph, classes...) so that the model gets a better overview
+- make foto ingestion more meaningful, e.g. by multiple passes so that the llm learns who shown in the picture via meta data (and some guessing). Alternative: provide golden samples with persons taked with their names. Further: add a way to provide context information, e.g. birth dates, so that a birthday party can be assigned to a specific person...
+- add the possibility to configure cron-jobs for ingestion runs per collection
+
