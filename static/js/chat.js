@@ -14,16 +14,8 @@ const chatPanel = {
   sessionId: null,
   busy: false,
   currentTurn: null, // {contentEl, toolCards: {id: el}}
-<<<<<<< HEAD
   modelsLoadedKey: null,
   modelsLoadedAt: 0,
-=======
-  models: [],
-  modelsKey: null,
-  modelsLoading: null,
-  streamAbortController: null,
-  stopping: false,
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
 
   async init() {
     document.getElementById("chat-form").addEventListener("submit", (e) => {
@@ -44,10 +36,7 @@ const chatPanel = {
     document.getElementById("chat-base-url").addEventListener("change", () => this.updateEndpointAndModels());
     document.getElementById("chat-model").addEventListener("change", () => this.saveEndpoint());
     document.getElementById("chat-refresh-models").addEventListener("click", () => this.loadModels(true));
-<<<<<<< HEAD
     document.getElementById("chat-test").addEventListener("click", () => this.testConnection());
-=======
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
     document.getElementById("chat-reset").addEventListener("click", () => this.resetConversation());
     document.getElementById("chat-stop").addEventListener("click", () => this.stopCurrentResponse());
   },
@@ -60,11 +49,7 @@ const chatPanel = {
       ]);
       this.renderEndpoint();
       this.renderDbSelectors();
-<<<<<<< HEAD
       await this.maybeLoadModels();
-=======
-      await this.loadModels();
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
     } catch (error) {
       showToast(`Failed to load chat config: ${error.message}`);
     }
@@ -128,21 +113,13 @@ const chatPanel = {
     };
     try {
       this.settings = await api.updateSettings(changes);
-<<<<<<< HEAD
       this.modelsLoadedKey = null;
-=======
-      if (this.modelsKey !== this.modelKey()) {
-        this.models = [];
-        this.modelsKey = null;
-      }
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
       app.refreshStatus();
     } catch (error) {
       showToast(`Could not save endpoint: ${error.message}`);
     }
   },
 
-<<<<<<< HEAD
   async loadModels(force = false) {
     const status = document.getElementById("chat-endpoint-status");
     status.textContent = force ? "Reloading models…" : "Loading models…";
@@ -163,11 +140,6 @@ const chatPanel = {
       status.textContent = error.message;
       status.classList.add("err");
     }
-=======
-  async updateEndpointAndModels() {
-    await this.saveEndpoint();
-    await this.loadModels();
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
   },
 
   async loadModels(force = false) {
@@ -317,11 +289,7 @@ const chatPanel = {
     this.stopping = false;
     this.setSending(true);
     this.startAssistantTurn();
-<<<<<<< HEAD
     this.currentTurn.statusEl.textContent = "Processing prompt…";
-=======
-    this.streamAbortController = new AbortController();
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
     const body = {
       session_id: this.sessionId,
       read_collections: this.selectedDbs("read"),
@@ -374,11 +342,7 @@ const chatPanel = {
       case "token":
         turn.raw += event.text;
         turn.contentEl.textContent = turn.raw;
-<<<<<<< HEAD
         turn.statusEl.textContent = "Generating response…";
-=======
-        turn.contentEl.classList.remove("chat-queued");
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
         this.scroll();
         break;
       case "usage":
@@ -397,17 +361,12 @@ const chatPanel = {
         break;
       case "done":
         if (!turn.raw.trim() && event.content) turn.raw = event.content;
-<<<<<<< HEAD
         if (turn.raw.trim()) {
           turn.contentEl.innerHTML = renderMarkdown(turn.raw);
         } else {
           turn.contentEl.innerHTML = '<div class="chat-error">No answer returned.</div>';
           turn.statusEl.textContent = "No answer returned.";
         }
-=======
-        turn.contentEl.innerHTML = renderMarkdown(turn.raw);
-        turn.contentEl.classList.remove("chat-queued");
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
         this.renderSources();
         if (turn.usage) turn.statusEl.textContent = this.formatUsage(turn.usage);
         break;

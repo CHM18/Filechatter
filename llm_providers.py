@@ -165,6 +165,8 @@ class OpenAICompatProvider:
             # Decode streamed SSE lines as UTF-8 with replacement to avoid
             # dropping the whole turn when a provider emits malformed bytes.
             for raw_line in response.iter_lines(decode_unicode=False):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ProviderCancelled("Generation stopped by user.")
                 if isinstance(raw_line, bytes):
                     line = raw_line.decode("utf-8", errors="replace")
                 else:
@@ -173,12 +175,6 @@ class OpenAICompatProvider:
                 if not line or not line.startswith("data:"):
                     continue
                 data = line[len("data:") :].strip()
-            for raw_line in response.iter_lines(decode_unicode=True):
-                if cancel_event is not None and cancel_event.is_set():
-                    raise ProviderCancelled("Generation stopped by user.")
-                if not raw_line or not raw_line.startswith("data:"):
-                    continue
-                data = raw_line[len("data:") :].strip()
                 if data == "[DONE]":
                     break
                 try:

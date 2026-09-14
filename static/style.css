@@ -432,15 +432,12 @@ dialog fieldset legend { display: flex; justify-content: space-between; align-it
 .chat-bubble.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
 .chat-bubble.assistant { align-self: flex-start; background: var(--bg); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
 .assistant-text { white-space: pre-wrap; }
-<<<<<<< HEAD
 .assistant-status {
   color: var(--text-dim);
   font-size: 0.78rem;
   margin: 0.1rem 0 0.35rem;
 }
-=======
 .chat-queued { color: var(--text-dim); font-size: 0.88rem; font-style: italic; }
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
 .chat-error { color: var(--err); font-size: 0.88rem; margin-top: 0.4rem; }
 .assistant-text code { background: var(--bg); padding: 0 0.25rem; border-radius: 3px; font-size: 0.9em; }
 .md-code {

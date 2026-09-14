@@ -317,7 +317,6 @@ class TestChatStreamApi:
         monkeypatch.setattr("rag_server.build_provider", lambda _llm: Ok())
         assert client.get("/llm/models").json()["models"] == ["qwen", "llama"]
 
-<<<<<<< HEAD
     def test_chat_stream_preserves_unicode(self, client, monkeypatch):
         class FakeProvider:
             def stream(self, messages, tools=None):
@@ -336,7 +335,6 @@ class TestChatStreamApi:
         assert "charset=utf-8" in response.headers["content-type"].lower()
         events = parse_sse(response.text)
         assert any(event.get("text") == "Grüße aus Köln: déjà vu." for event in events)
-=======
     def test_chat_cancel_idle_for_unknown_session(self, client):
         payload = client.post("/chat/cancel", json={"session_id": "missing"}).json()
         assert payload["status"] == "idle"
@@ -433,4 +431,3 @@ class TestMemoryApi:
             "Uses Python for small automation utilities.",
             "Prefers Python for automation scripts.",
         ]
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4

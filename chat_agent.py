@@ -339,11 +339,8 @@ def run(
             yield {"type": "done", "content": assistant_message.get("content", "")}
             return
 
-<<<<<<< HEAD
-=======
     except ProviderCancelled as exc:
         yield {"type": "cancelled", "message": str(exc)}
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
     except ProviderError as exc:
         yield {"type": "error", "message": str(exc)}
     except Exception as exc:  # pragma: no cover - defensive

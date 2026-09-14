@@ -8,10 +8,7 @@ import json
 import uuid
 import threading
 import time
-<<<<<<< HEAD
-=======
 import re
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
 from pathlib import Path
 from typing import Any
 from contextlib import asynccontextmanager
@@ -43,9 +40,6 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 _MODEL_CACHE_TTL_SECONDS = 60
 _MODEL_CACHE_LOCK = threading.Lock()
-<<<<<<< HEAD
-_MODEL_CACHE: dict[tuple[str, str, str], tuple[float, list[str]]] = {}
-=======
 _MODEL_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
 MAX_MEMORY_FACTS_PER_TURN = 3
 MAX_MEMORY_CONTEXT_CHARS = 800
@@ -53,7 +47,6 @@ SENSITIVE_MEMORY_RE = re.compile(
     r"\b(?:password|passphrase|api[ _-]?key|access[ _-]?token|secret|ssn|social security|credit card)\b",
     re.IGNORECASE,
 )
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
 
 
 @asynccontextmanager
@@ -111,14 +104,10 @@ def _total_chunks(collection_name: str) -> int:
 
 def _cached_model_list(llm_settings: dict[str, Any], force: bool = False) -> list[str]:
     provider = build_provider(llm_settings)
-<<<<<<< HEAD
-    cache_key = (provider.base_url, provider.api_key or "", provider.model)
-=======
     cache_key = (
         str(getattr(provider, "base_url", llm_settings.get("base_url", ""))),
         str(getattr(provider, "api_key", llm_settings.get("api_key", "")) or ""),
     )
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
     now = time.monotonic()
     with _MODEL_CACHE_LOCK:
         cached = _MODEL_CACHE.get(cache_key)
@@ -597,11 +586,6 @@ async def chat_stream(request: ChatStreamRequest):
         raise HTTPException(status_code=404, detail="Unknown chat session.")
 
     def event_stream():
-<<<<<<< HEAD
-        yield f"data: {json.dumps({'type': 'session', 'session_id': session_id}, ensure_ascii=False)}\n\n"
-        for event in chat_agent.run(provider, messages, read_cols, write_cols, decisions):
-            yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
-=======
         try:
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id}, ensure_ascii=False)}\n\n"
             model_queue = runtime.model_queue()
@@ -628,7 +612,6 @@ async def chat_stream(request: ChatStreamRequest):
                     yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
         finally:
             store.end_stream(session_id)
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
 
     return StreamingResponse(
         event_stream(),

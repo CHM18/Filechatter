@@ -71,10 +71,6 @@ const api = {
     return this.request(`/llm/models${query}`);
   },
 
-<<<<<<< HEAD
-  listModels(force = false) {
-    return this.request(`/llm/models${force ? "?force=true" : ""}`);
-=======
   listMemories() {
     return this.request("/memories");
   },
@@ -103,7 +99,6 @@ const api = {
       method: "POST",
       body: JSON.stringify({ session_id: sessionId }),
     });
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
   },
 
   // Stream chat events. `onEvent(evt)` is called per SSE event; resolves when the stream ends.
@@ -122,11 +117,7 @@ const api = {
       throw new Error(detail);
     }
     const reader = response.body.getReader();
-<<<<<<< HEAD
-    const decoder = new TextDecoder("utf-8");
-=======
     const decoder = new TextDecoder("utf-8", { fatal: true });
->>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
     let buffer = "";
 
     const emitFromBuffer = () => {
