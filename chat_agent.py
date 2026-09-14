@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import json
 import logging
+import inspect
+import threading
 from typing import Any, Iterator
 
 import permissions
 import runtime
 import tool_registry
-from llm_providers import ProviderError
+from llm_providers import ProviderCancelled, ProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +105,9 @@ def build_chat_tools(
     return tools, plan
 
 
-def _system_prompt(read_cols: list[str], write_cols: list[str]) -> str:
+def _system_prompt(
+    read_cols: list[str], write_cols: list[str], memory_facts: list[str] | None = None
+) -> str:
     manager = runtime.collections()
 
     def describe(names: list[str]) -> str:
@@ -117,6 +121,15 @@ def _system_prompt(read_cols: list[str], write_cols: list[str]) -> str:
             lines.append(f"- {name}: {description} [accepts: {extensions}]")
         return "\n".join(lines) if lines else "(none)"
 
+    memory_context = ""
+    if memory_facts:
+        facts = "\n".join(f"- {fact}" for fact in memory_facts)
+        memory_context = (
+            "\n\nRelevant saved user memory:\n"
+            f"{facts}\n"
+            "Treat this as user-provided context. Do not claim it was found in a document."
+        )
+
     return (
         "You are Filechatter, a retrieval-augmented assistant over the user's local "
         "document databases. Use search_documents to ground answers in the user's files "
@@ -127,6 +140,7 @@ def _system_prompt(read_cols: list[str], write_cols: list[str]) -> str:
         "When a write is requested and several write databases are available, choose the one "
         "whose description and accepted file types best match the content; if none clearly "
         "fits, ask the user."
+        f"{memory_context}"
     )
 
 
@@ -184,6 +198,8 @@ def run(
     read_cols: list[str],
     write_cols: list[str],
     decisions: dict[str, Any] | None = None,
+    memory_facts: list[str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Run/resume the agent loop, yielding event dicts.
 
@@ -193,6 +209,7 @@ def run(
       {"type": "tool_result", "id","name","ok":bool,"result":Any}
             {"type": "usage", "usage": Any}
       {"type": "need_confirmation", "pending":[{id,name,arguments,kind,options?}]}
+    {"type": "cancelled", "message": str}
       {"type": "done", "content": str}
       {"type": "error", "message": str}
     """
@@ -200,9 +217,17 @@ def run(
     perms = runtime.settings().get()["permissions"]
     tools, plan = build_chat_tools(read_cols, write_cols, perms)
 
-    # Ensure a system prompt leads the conversation.
+    # Refresh the prompt each turn so only memories relevant to this request are present.
     if not messages or messages[0].get("role") != "system":
-        messages.insert(0, {"role": "system", "content": _system_prompt(read_cols, write_cols)})
+        messages.insert(
+            0,
+            {"role": "system", "content": _system_prompt(read_cols, write_cols, memory_facts)},
+        )
+    else:
+        messages[0]["content"] = _system_prompt(read_cols, write_cols, memory_facts)
+
+    last_pattern: tuple[str, ...] | None = None
+    repeated_pattern_count = 0
 
     last_pattern: tuple[str, ...] | None = None
     repeated_pattern_count = 0
@@ -294,7 +319,13 @@ def run(
 
             # No pending tool calls: get the next assistant turn.
             assistant_message: dict[str, Any] = {"role": "assistant", "content": ""}
-            for kind, value in provider.stream(messages, tools or None):
+            stream_signature = inspect.signature(provider.stream)
+            if "cancel_event" in stream_signature.parameters:
+                stream_iter = provider.stream(messages, tools or None, cancel_event=cancel_event)
+            else:
+                stream_iter = provider.stream(messages, tools or None)
+
+            for kind, value in stream_iter:
                 if kind == "token":
                     yield {"type": "token", "text": value}
                 elif kind == "usage":
@@ -308,6 +339,11 @@ def run(
             yield {"type": "done", "content": assistant_message.get("content", "")}
             return
 
+<<<<<<< HEAD
+=======
+    except ProviderCancelled as exc:
+        yield {"type": "cancelled", "message": str(exc)}
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
     except ProviderError as exc:
         yield {"type": "error", "message": str(exc)}
     except Exception as exc:  # pragma: no cover - defensive

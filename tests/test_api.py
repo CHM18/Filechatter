@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 
 class TestHealth:
@@ -12,6 +13,28 @@ class TestHealth:
         assert payload["status"] == "ok"
         assert "collections_count" in payload
         assert "chunks_count" in payload
+
+    def test_health_reuses_the_model_list_cache(self, client, monkeypatch):
+        import rag_server
+
+        calls = []
+
+        class Provider:
+            base_url = "http://localhost:1234"
+            api_key = None
+            model = "test-model"
+
+            def list_models(self):
+                calls.append("models")
+                return ["test-model"]
+
+        monkeypatch.setattr("rag_server.build_provider", lambda _settings: Provider())
+        rag_server._MODEL_CACHE.clear()
+
+        assert client.get("/health").status_code == 200
+        assert client.get("/health").status_code == 200
+        assert calls == ["models"]
+        rag_server._MODEL_CACHE.clear()
 
 
 class TestFileTypesApi:
@@ -254,6 +277,22 @@ class TestChatStreamApi:
         assert events[-1]["type"] == "done"
         assert events[-1]["content"] == "Hi there"
 
+    def test_chat_stream_preserves_unicode(self, client, monkeypatch):
+        class FakeProvider:
+            def stream(self, messages, tools=None):
+                yield ("token", "Grüße aus Köln: déjà vu.")
+                yield ("message", {"role": "assistant", "content": "Grüße aus Köln: déjà vu."})
+
+        monkeypatch.setattr("rag_server.build_provider", lambda _llm: FakeProvider())
+        response = client.post(
+            "/chat/stream",
+            json={"message": "Wie geht es?", "read_collections": [], "write_collections": []},
+        )
+
+        assert "charset=utf-8" in response.headers["content-type"].lower()
+        events = parse_sse(response.text)
+        assert any(event.get("text") == "Grüße aus Köln: déjà vu." for event in events)
+
     def test_llm_test_endpoint_reports_failure(self, client, monkeypatch):
         from llm_providers import ProviderError
 
@@ -278,6 +317,7 @@ class TestChatStreamApi:
         monkeypatch.setattr("rag_server.build_provider", lambda _llm: Ok())
         assert client.get("/llm/models").json()["models"] == ["qwen", "llama"]
 
+<<<<<<< HEAD
     def test_chat_stream_preserves_unicode(self, client, monkeypatch):
         class FakeProvider:
             def stream(self, messages, tools=None):
@@ -296,3 +336,101 @@ class TestChatStreamApi:
         assert "charset=utf-8" in response.headers["content-type"].lower()
         events = parse_sse(response.text)
         assert any(event.get("text") == "Grüße aus Köln: déjà vu." for event in events)
+=======
+    def test_chat_cancel_idle_for_unknown_session(self, client):
+        payload = client.post("/chat/cancel", json={"session_id": "missing"}).json()
+        assert payload["status"] == "idle"
+
+    def test_chat_cancel_active_session(self, client):
+        import runtime
+
+        session_id = "session-cancel"
+        runtime.chat_sessions().create(session_id, [], [])
+        runtime.chat_sessions().begin_stream(session_id)
+
+        payload = client.post("/chat/cancel", json={"session_id": session_id}).json()
+        assert payload["status"] == "success"
+        assert runtime.chat_sessions().get(session_id)["cancel_event"].is_set() is True
+
+        runtime.chat_sessions().end_stream(session_id)
+
+
+class TestMemoryApi:
+    def test_memory_crud(self, client):
+        created = client.post(
+            "/memories",
+            json={"category": "preference", "fact": "Prefers concise technical explanations."},
+        )
+        assert created.status_code == 201
+        memory = created.json()["memory"]
+
+        listed = client.get("/memories")
+        assert listed.status_code == 200
+        assert [item["fact"] for item in listed.json()["memories"]] == [memory["fact"]]
+
+        updated = client.patch(
+            f"/memories/{memory['id']}", json={"enabled": False}
+        )
+        assert updated.status_code == 200
+        assert updated.json()["memory"]["enabled"] is False
+
+        assert client.delete(f"/memories/{memory['id']}").status_code == 204
+        assert client.get("/memories").json()["memories"] == []
+
+    def test_chat_uses_relevant_memory_and_extraction_excludes_tool_data(self, client, monkeypatch):
+        import runtime
+
+        runtime.memories().add("preference", "Prefers Python for automation scripts.")
+        extracted = threading.Event()
+        captured_chat_messages = []
+        captured_extraction_messages = []
+
+        class FakeProvider:
+            def stream(self, messages, tools=None):
+                if messages[0]["content"] == "You return valid JSON and nothing else.":
+                    captured_extraction_messages.extend(messages)
+                    extracted.set()
+                    yield (
+                        "message",
+                        {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "memories": [
+                                        {
+                                            "category": "workflow",
+                                            "fact": "Uses Python for small automation utilities.",
+                                        }
+                                    ]
+                                }
+                            ),
+                        },
+                    )
+                    return
+                captured_chat_messages.extend(messages)
+                yield ("message", {"role": "assistant", "content": "Use Python."})
+
+        monkeypatch.setattr("rag_server.build_provider", lambda _llm: FakeProvider())
+        response = client.post(
+            "/chat/stream",
+            json={
+                "message": "Which language should I use for an automation utility?",
+                "read_collections": [],
+                "write_collections": [],
+            },
+        )
+
+        assert response.status_code == 200
+        assert "Relevant saved user memory:\n- Prefers Python for automation scripts." in (
+            captured_chat_messages[0]["content"]
+        )
+        assert extracted.wait(timeout=1)
+        assert len(captured_extraction_messages) == 2
+        extraction_text = captured_extraction_messages[1]["content"]
+        assert "tool_call" not in extraction_text
+        assert "tool_result" not in extraction_text
+        assert [memory.fact for memory in runtime.memories().list()] == [
+            "Uses Python for small automation utilities.",
+            "Prefers Python for automation scripts.",
+        ]
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4

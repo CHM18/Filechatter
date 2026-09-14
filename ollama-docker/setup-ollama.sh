@@ -6,6 +6,7 @@ IMAGE_NAME="ollama:latest"
 OLLAMA_DIR="${HOME}/ollama"
 MODEL_NAME="nemotron-3-nano:4b"
 
+<<<<<<< HEAD
 install_docker_if_missing() {
     if command -v docker &>/dev/null; then
         return 0
@@ -48,6 +49,8 @@ ensure_docker_ready() {
 
 ensure_docker_ready
 
+=======
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
 # ── Create model storage directory ────────────────────────────────
 if [ ! -d "$OLLAMA_DIR" ]; then
     echo "→ Creating model storage directory at $OLLAMA_DIR ..."
@@ -95,6 +98,7 @@ install_nvidia_container_toolkit() {
     sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null || true
 }
 
+<<<<<<< HEAD
 verify_nvidia_container_toolkit() {
     echo "→ Verifying NVIDIA Container Toolkit installation ..."
     if ! command -v nvidia-ctk &>/dev/null; then
@@ -141,10 +145,13 @@ prepare_wsl_legacy_libs() {
     return 0
 }
 
+=======
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
 # ── Detect NVIDIA GPU ────────────────────────────────────────────
 GPU_FLAGS=""
 CDI_SPEC_PATH="/etc/cdi/nvidia.yaml"
 CDI_GENERATE_ARGS="--output=${CDI_SPEC_PATH}"
+<<<<<<< HEAD
 CDI_SPEC_BACKUP_PATH="${CDI_SPEC_PATH}.filechatter.bak"
 WSL_LIBDXCORE_PATH="/usr/lib/wsl/lib/libdxcore.so"
 IS_WSL=0
@@ -159,16 +166,26 @@ if [ "$IS_WSL" -eq 1 ] && [ -e "$WSL_LIBDXCORE_PATH" ]; then
 elif [ "$IS_WSL" -eq 1 ]; then
     echo "⚠  WSL detected but ${WSL_LIBDXCORE_PATH} was not found."
     echo "   Falling back to non-WSL CDI generation to avoid broken GPU mounts."
+=======
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    # WSL2 needs --mode=wsl so the ldcache hook targets the driver-store folder.
+    CDI_GENERATE_ARGS="--mode=wsl ${CDI_GENERATE_ARGS}"
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
 fi
 
 if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
     echo "→ NVIDIA GPU detected on host — preparing CDI spec ..."
 
+<<<<<<< HEAD
     if ! verify_nvidia_container_toolkit; then
+=======
+    if ! command -v nvidia-ctk &>/dev/null; then
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
         install_nvidia_container_toolkit || true
     fi
 
     # Always (re)generate so the spec reflects the correct mode (e.g. WSL) and current driver.
+<<<<<<< HEAD
     if verify_nvidia_container_toolkit; then
         echo "→ Generating CDI spec at ${CDI_SPEC_PATH} (args: ${CDI_GENERATE_ARGS}) ..."
         sudo mkdir -p "$(dirname "$CDI_SPEC_PATH")"
@@ -260,6 +277,38 @@ if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
         echo "   Install/fix the toolkit and rerun this script:"
         echo "     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
     fi
+=======
+    if command -v nvidia-ctk &>/dev/null; then
+        echo "→ Generating CDI spec at ${CDI_SPEC_PATH} (args: ${CDI_GENERATE_ARGS}) ..."
+        sudo mkdir -p "$(dirname "$CDI_SPEC_PATH")"
+        sudo nvidia-ctk cdi generate $CDI_GENERATE_ARGS
+    else
+        echo "⚠  nvidia-ctk still not available — cannot generate a CDI spec."
+        echo "   Install the NVIDIA Container Toolkit manually:"
+        echo "     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
+    fi
+
+    # Verify --gpus all actually works end-to-end before trusting it for the real container.
+    # --entrypoint overrides the image's "ollama" entrypoint so nvidia-smi actually runs.
+    echo "→ Verifying Docker GPU access ..."
+    GPU_TEST_OUTPUT="$(timeout 30 docker run --rm --gpus all --entrypoint nvidia-smi "$IMAGE_NAME" 2>&1)"
+    GPU_TEST_STATUS=$?
+    if [ $GPU_TEST_STATUS -eq 0 ]; then
+        echo "✓ Docker GPU access confirmed — enabling GPU support ..."
+        GPU_FLAGS="--gpus all"
+    else
+        if [ $GPU_TEST_STATUS -eq 124 ]; then
+            echo "⚠  GPU test timed out after 30s. Running in CPU-only mode."
+        else
+            echo "⚠  Docker could not access the GPU (--gpus all test failed). Running in CPU-only mode."
+        fi
+        echo "   Test output:"
+        echo "$GPU_TEST_OUTPUT" | sed 's/^/     /'
+        echo "   Common causes: CDI spec missing/stale, NVIDIA Container Toolkit not configured,"
+        echo "   or (on Docker Desktop/WSL2) GPU support not enabled in Docker Desktop settings."
+        echo "   Docs: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
+    fi
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
 else
     echo "⚠  nvidia-smi not found or no GPU detected. Running in CPU-only mode."
     echo "   For GPU support, install:"

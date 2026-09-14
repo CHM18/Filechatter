@@ -66,19 +66,52 @@ const api = {
     });
   },
 
-  testEndpoint() {
-    return this.request("/llm/test", { method: "POST" });
+  listModels(force = false) {
+    const query = force ? "?force=true" : "";
+    return this.request(`/llm/models${query}`);
   },
 
+<<<<<<< HEAD
   listModels(force = false) {
     return this.request(`/llm/models${force ? "?force=true" : ""}`);
+=======
+  listMemories() {
+    return this.request("/memories");
+  },
+
+  updateMemory(id, body) {
+    return this.request(`/memories/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+  },
+
+  deleteMemory(id) {
+    return this.request(`/memories/${id}`, { method: "DELETE" });
+  },
+
+  clearMemories() {
+    return this.request("/memories?confirm=true", { method: "DELETE" });
+  },
+
+  executeTool(name, toolArguments = {}) {
+    return this.request(`/tools/${encodeURIComponent(name)}`, {
+      method: "POST",
+      body: JSON.stringify({ arguments: toolArguments }),
+    });
+  },
+
+  cancelChat(sessionId) {
+    return this.request("/chat/cancel", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
   },
 
   // Stream chat events. `onEvent(evt)` is called per SSE event; resolves when the stream ends.
-  async streamChat(body, onEvent) {
+  async streamChat(body, onEvent, options = {}) {
     const response = await fetch("/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: options.signal,
       body: JSON.stringify(body),
     });
     if (!response.ok) {
@@ -89,7 +122,11 @@ const api = {
       throw new Error(detail);
     }
     const reader = response.body.getReader();
+<<<<<<< HEAD
     const decoder = new TextDecoder("utf-8");
+=======
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
     let buffer = "";
 
     const emitFromBuffer = () => {
@@ -126,6 +163,10 @@ const api = {
       } catch (_) {
         /* ignore malformed trailing payload */
       }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim().startsWith("data:")) {
+      onEvent(JSON.parse(buffer.trim().slice(5).trim()));
     }
   },
 };

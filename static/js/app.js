@@ -12,6 +12,7 @@ const app = {
       collectionsPanel.init(),
       permissionsPanel.init(),
       chatPanel.init(),
+      memoryPanel.init(),
     ]);
     await chatPanel.refresh(); // Chat is the default tab.
 
@@ -27,6 +28,7 @@ const app = {
       panel.classList.toggle("active", panel.id === `panel-${name}`);
     });
     if (name === "chat") chatPanel.refresh();
+    if (name === "memory") memoryPanel.refresh();
     if (name === "databases") collectionsPanel.refresh();
     if (name === "permissions") permissionsPanel.refresh();
   },

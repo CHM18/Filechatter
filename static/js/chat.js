@@ -14,8 +14,16 @@ const chatPanel = {
   sessionId: null,
   busy: false,
   currentTurn: null, // {contentEl, toolCards: {id: el}}
+<<<<<<< HEAD
   modelsLoadedKey: null,
   modelsLoadedAt: 0,
+=======
+  models: [],
+  modelsKey: null,
+  modelsLoading: null,
+  streamAbortController: null,
+  stopping: false,
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
 
   async init() {
     document.getElementById("chat-form").addEventListener("submit", (e) => {
@@ -31,13 +39,17 @@ const chatPanel = {
     document.getElementById("chat-provider").addEventListener("change", (e) => {
       const base = PROVIDER_DEFAULTS[e.target.value];
       if (base) document.getElementById("chat-base-url").value = base;
-      this.saveEndpoint();
+      this.updateEndpointAndModels();
     });
-    document.getElementById("chat-base-url").addEventListener("change", () => this.saveEndpoint());
+    document.getElementById("chat-base-url").addEventListener("change", () => this.updateEndpointAndModels());
     document.getElementById("chat-model").addEventListener("change", () => this.saveEndpoint());
     document.getElementById("chat-refresh-models").addEventListener("click", () => this.loadModels(true));
+<<<<<<< HEAD
     document.getElementById("chat-test").addEventListener("click", () => this.testConnection());
+=======
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
     document.getElementById("chat-reset").addEventListener("click", () => this.resetConversation());
+    document.getElementById("chat-stop").addEventListener("click", () => this.stopCurrentResponse());
   },
 
   async refresh() {
@@ -48,7 +60,11 @@ const chatPanel = {
       ]);
       this.renderEndpoint();
       this.renderDbSelectors();
+<<<<<<< HEAD
       await this.maybeLoadModels();
+=======
+      await this.loadModels();
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
     } catch (error) {
       showToast(`Failed to load chat config: ${error.message}`);
     }
@@ -60,8 +76,20 @@ const chatPanel = {
     const llm = this.settings.llm;
     document.getElementById("chat-provider").value = llm.provider in PROVIDER_DEFAULTS ? llm.provider : "openai_compat";
     document.getElementById("chat-base-url").value = llm.base_url || "";
+    this.renderModelOptions(llm.model);
+  },
+
+  modelKey() {
+    return `${document.getElementById("chat-provider").value}|${document.getElementById("chat-base-url").value.trim()}`;
+  },
+
+  renderModelOptions(selectedModel) {
     const modelSelect = document.getElementById("chat-model");
-    modelSelect.innerHTML = `<option value="${escapeHtml(llm.model)}">${escapeHtml(llm.model)}</option>`;
+    const models = [...new Set([selectedModel, ...this.models].filter(Boolean))];
+    modelSelect.innerHTML = models
+      .map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`)
+      .join("");
+    modelSelect.value = selectedModel;
   },
 
   currentModelKey() {
@@ -100,13 +128,21 @@ const chatPanel = {
     };
     try {
       this.settings = await api.updateSettings(changes);
+<<<<<<< HEAD
       this.modelsLoadedKey = null;
+=======
+      if (this.modelsKey !== this.modelKey()) {
+        this.models = [];
+        this.modelsKey = null;
+      }
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
       app.refreshStatus();
     } catch (error) {
       showToast(`Could not save endpoint: ${error.message}`);
     }
   },
 
+<<<<<<< HEAD
   async loadModels(force = false) {
     const status = document.getElementById("chat-endpoint-status");
     status.textContent = force ? "Reloading models…" : "Loading models…";
@@ -127,26 +163,44 @@ const chatPanel = {
       status.textContent = error.message;
       status.classList.add("err");
     }
+=======
+  async updateEndpointAndModels() {
+    await this.saveEndpoint();
+    await this.loadModels();
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
   },
 
-  async testConnection() {
-    const status = document.getElementById("chat-endpoint-status");
-    status.textContent = "Testing…";
-    status.className = "endpoint-status";
-    try {
-      await this.saveEndpoint();
-      const result = await api.testEndpoint();
-      if (result.ok) {
-        status.textContent = `Connected — ${result.model_count} model(s)`;
-        status.classList.add("ok");
-      } else {
-        status.textContent = result.error;
-        status.classList.add("err");
-      }
-    } catch (error) {
-      status.textContent = error.message;
-      status.classList.add("err");
+  async loadModels(force = false) {
+    const key = this.modelKey();
+    if (!force && this.modelsKey === key && this.models.length) {
+      this.renderModelOptions(this.settings.llm.model);
+      return;
     }
+    if (this.modelsLoading) return this.modelsLoading;
+
+    const status = document.getElementById("chat-endpoint-status");
+    status.textContent = force ? "Refreshing models…" : "Loading models…";
+    status.className = "endpoint-status";
+    this.modelsLoading = (async () => {
+      try {
+        await this.saveEndpoint(); // persist base_url first so the server queries the right host
+        const models = (await api.listModels(force)).models || [];
+        const current = this.settings.llm.model;
+        this.models = models;
+        this.modelsKey = key;
+        const selectedModel = models.includes(current) ? current : (models[0] || current);
+        this.renderModelOptions(selectedModel);
+        if (selectedModel !== current) await this.saveEndpoint();
+        status.textContent = `${models.length} model(s) available`;
+        status.classList.add("ok");
+      } catch (error) {
+        status.textContent = error.message;
+        status.classList.add("err");
+      } finally {
+        this.modelsLoading = null;
+      }
+    })();
+    return this.modelsLoading;
   },
 
   // ---------- Database selectors ----------
@@ -260,9 +314,14 @@ const chatPanel = {
 
   async runStream(extra) {
     this.busy = true;
+    this.stopping = false;
     this.setSending(true);
     this.startAssistantTurn();
+<<<<<<< HEAD
     this.currentTurn.statusEl.textContent = "Processing prompt…";
+=======
+    this.streamAbortController = new AbortController();
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
     const body = {
       session_id: this.sessionId,
       read_collections: this.selectedDbs("read"),
@@ -270,12 +329,35 @@ const chatPanel = {
       ...extra,
     };
     try {
-      await api.streamChat(body, (event) => this.handleEvent(event));
+      await api.streamChat(body, (event) => this.handleEvent(event), {
+        signal: this.streamAbortController.signal,
+      });
     } catch (error) {
-      this.currentTurn.contentEl.innerHTML += `<div class="chat-error">Error: ${escapeHtml(error.message)}</div>`;
+      if (!this.stopping && error.name !== "AbortError") {
+        this.currentTurn.contentEl.innerHTML += `<div class="chat-error">Error: ${escapeHtml(error.message)}</div>`;
+      }
     } finally {
+      this.streamAbortController = null;
+      this.stopping = false;
       this.busy = false;
       this.setSending(false);
+    }
+  },
+
+  async stopCurrentResponse() {
+    if (!this.busy) return;
+    this.stopping = true;
+    const stopButton = document.getElementById("chat-stop");
+    stopButton.disabled = true;
+    stopButton.textContent = "Stopping…";
+    try {
+      if (this.sessionId) {
+        await api.cancelChat(this.sessionId);
+      }
+    } catch (error) {
+      showToast(`Cancel request failed: ${error.message}`);
+    } finally {
+      this.streamAbortController?.abort();
     }
   },
 
@@ -285,10 +367,18 @@ const chatPanel = {
       case "session":
         this.sessionId = event.session_id;
         break;
+      case "queued":
+        turn.contentEl.textContent = event.message;
+        turn.contentEl.classList.add("chat-queued");
+        break;
       case "token":
         turn.raw += event.text;
         turn.contentEl.textContent = turn.raw;
+<<<<<<< HEAD
         turn.statusEl.textContent = "Generating response…";
+=======
+        turn.contentEl.classList.remove("chat-queued");
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
         this.scroll();
         break;
       case "usage":
@@ -307,15 +397,26 @@ const chatPanel = {
         break;
       case "done":
         if (!turn.raw.trim() && event.content) turn.raw = event.content;
+<<<<<<< HEAD
         if (turn.raw.trim()) {
           turn.contentEl.innerHTML = renderMarkdown(turn.raw);
         } else {
           turn.contentEl.innerHTML = '<div class="chat-error">No answer returned.</div>';
           turn.statusEl.textContent = "No answer returned.";
         }
+=======
+        turn.contentEl.innerHTML = renderMarkdown(turn.raw);
+        turn.contentEl.classList.remove("chat-queued");
+>>>>>>> 30cc9c8facd449c46ec613e43dcb9aaa6c416ce4
         this.renderSources();
         if (turn.usage) turn.statusEl.textContent = this.formatUsage(turn.usage);
         break;
+      case "cancelled": {
+        const base = turn.raw.trim() ? renderMarkdown(turn.raw) : "Generation stopped.";
+        turn.contentEl.innerHTML = `${base}<div class="chat-error">${escapeHtml(event.message || "Generation stopped.")}</div>`;
+        turn.contentEl.classList.remove("chat-queued");
+        break;
+      }
       case "error":
         turn.statusEl.textContent = "Failed";
         turn.contentEl.innerHTML += `<div class="chat-error">${escapeHtml(event.message)}</div>`;
@@ -462,8 +563,18 @@ const chatPanel = {
   },
 
   setSending(sending) {
-    document.getElementById("chat-send").disabled = sending;
-    document.getElementById("chat-send").textContent = sending ? "…" : "Send";
+    const sendButton = document.getElementById("chat-send");
+    const stopButton = document.getElementById("chat-stop");
+    const label = sendButton.querySelector(".send-label");
+
+    sendButton.disabled = sending;
+    if (label) label.textContent = sending ? "Sending…" : "Send";
+
+    stopButton.disabled = !sending;
+    stopButton.classList.toggle("is-stopping", sending && this.stopping);
+    stopButton.innerHTML = sending && this.stopping
+      ? '<span class="stop-spinner" aria-hidden="true"></span><span>Stopping…</span>'
+      : "Stop";
   },
 
   scroll() {

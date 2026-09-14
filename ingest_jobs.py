@@ -34,6 +34,7 @@ class IngestJob:
     recursive: bool
     total_files: int
     collection_name: str = "all"
+    job_type: str = "documents"
     log_stamp: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
     status: str = "queued"
     processed_files: int = 0
@@ -124,6 +125,7 @@ class IngestJobManager:
             "path": job.path,
             "recursive": job.recursive,
             "collection_name": job.collection_name,
+            "job_type": job.job_type,
             "total_files": job.total_files,
             "processed_files": job.processed_files,
             "succeeded_files": job.succeeded_files,
@@ -283,3 +285,4 @@ class IngestJobManager:
                 job.current_file = None
                 job.finished_at = time()
             self._start_next_queued()
+

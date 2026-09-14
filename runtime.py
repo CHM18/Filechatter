@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import atexit
 import threading
+from collections import deque
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from collections_manager import CollectionsManager
 from ingest_jobs import IngestJobManager
+from memory_store import MemoryStore
 from settings_manager import SettingsManager
 
 
@@ -32,7 +36,13 @@ class ChatSessionStore:
 
     def create(self, session_id: str, read_cols: list[str], write_cols: list[str]) -> dict[str, Any]:
         with self._lock:
-            session = {"messages": [], "read_cols": read_cols, "write_cols": write_cols}
+            session = {
+                "messages": [],
+                "read_cols": read_cols,
+                "write_cols": write_cols,
+                "cancel_event": threading.Event(),
+                "active_streams": 0,
+            }
             self._sessions[session_id] = session
             return session
 
@@ -44,12 +54,105 @@ class ChatSessionStore:
         with self._lock:
             self._sessions.pop(session_id, None)
 
+    def begin_stream(self, session_id: str) -> threading.Event | None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return None
+            cancel_event = session["cancel_event"]
+            cancel_event.clear()
+            session["active_streams"] = int(session.get("active_streams", 0)) + 1
+            return cancel_event
+
+    def end_stream(self, session_id: str) -> None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return
+            active = int(session.get("active_streams", 0))
+            session["active_streams"] = max(0, active - 1)
+
+    def cancel(self, session_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return False
+            if int(session.get("active_streams", 0)) <= 0:
+                return False
+            session["cancel_event"].set()
+            return True
+
+
+class LocalModelQueue:
+    """Serialize local LLM work, prioritizing queued extraction before a new chat turn."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._tasks: deque[Callable[[], None]] = deque()
+        self._active = False
+        self._closed = False
+        self._worker = threading.Thread(target=self._run, name="memory-extraction", daemon=True)
+        self._worker.start()
+
+    def enqueue_extraction(self, task: Callable[[], None]) -> None:
+        with self._condition:
+            if self._closed:
+                return
+            self._tasks.append(task)
+            self._condition.notify_all()
+
+    def has_pending_work(self) -> bool:
+        with self._condition:
+            return self._active or bool(self._tasks)
+
+    @contextmanager
+    def chat_turn(self) -> Iterator[None]:
+        with self._condition:
+            while not self._closed and (self._active or self._tasks):
+                self._condition.wait()
+            if self._closed:
+                raise RuntimeError("The local model queue is closed.")
+            self._active = True
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._active = False
+                self._condition.notify_all()
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while not self._closed and (not self._tasks or self._active):
+                    self._condition.wait()
+                if self._closed:
+                    return
+                task = self._tasks.popleft()
+                self._active = True
+            try:
+                task()
+            except Exception:
+                # Extraction is opportunistic; a failed task must never stop the queue.
+                pass
+            finally:
+                with self._condition:
+                    self._active = False
+                    self._condition.notify_all()
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._tasks.clear()
+            self._condition.notify_all()
+
 
 _lock = threading.Lock()
 _collections: CollectionsManager | None = None
 _jobs: IngestJobManager | None = None
 _settings: SettingsManager | None = None
 _chat_sessions: ChatSessionStore | None = None
+_memory_store: MemoryStore | None = None
+_model_queue: LocalModelQueue | None = None
 
 
 def collections() -> CollectionsManager:
@@ -94,13 +197,35 @@ def chat_sessions() -> ChatSessionStore:
         return _chat_sessions
 
 
+def memories() -> MemoryStore:
+    global _memory_store
+    with _lock:
+        if _memory_store is None:
+            _memory_store = MemoryStore()
+        return _memory_store
+
+
+def model_queue() -> LocalModelQueue:
+    global _model_queue
+    with _lock:
+        if _model_queue is None:
+            _model_queue = LocalModelQueue()
+        return _model_queue
+
+
 def reset() -> None:
     """Close and drop all singletons (used by tests and shutdown)."""
-    global _collections, _jobs, _settings, _chat_sessions
+    global _collections, _jobs, _settings, _chat_sessions, _memory_store, _model_queue
     with _lock:
         if _collections is not None:
             _collections.close_all()
+        if _memory_store is not None:
+            _memory_store.close()
+        if _model_queue is not None:
+            _model_queue.close()
         _collections = None
         _jobs = None
         _settings = None
         _chat_sessions = None
+        _memory_store = None
+        _model_queue = None

@@ -10,15 +10,21 @@ Extensions are organized into categories (Office / Text / Web / Data & Config
 """
 from __future__ import annotations
 
+import base64
 import html as html_module
 import importlib.util
 import logging
 import re
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 import sys
 from typing import Any
+
+import requests
+
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -132,12 +138,157 @@ def _read_pptx(path: Path) -> str:
     return "\n".join(parts)
 
 
+_IMAGE_MIME = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".avif": "image/avif",
+    ".heic": "image/heic",
+}
+
+
+def _normalize_base_url(base_url: str | None) -> str:
+    value = (base_url or "").strip()
+    if not value:
+        return ""
+    if "://" not in value:
+        value = f"http://{value.lstrip('/')}"
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return value.rstrip("/")
+
+
+def _extract_image_exif(path: Path) -> dict[str, Any]:
+    try:
+        from PIL import ExifTags, Image
+    except ImportError as exc:
+        raise RuntimeError("Reading image EXIF requires the optional dependency 'Pillow'.") from exc
+
+    with Image.open(path) as image:
+        raw_exif = image.getexif()
+        if not raw_exif:
+            return {}
+        name_by_id = ExifTags.TAGS
+        normalized: dict[str, Any] = {}
+        for key, value in raw_exif.items():
+            tag_name = name_by_id.get(key, str(key))
+            if tag_name in config.IMAGE_EXIF_FIELDS and value not in (None, "", (), [], {}):
+                normalized[tag_name] = str(value)
+        return normalized
+
+
+def _summarize_image_with_llm(path: Path) -> str:
+    base_url = _normalize_base_url(config.IMAGE_VISION_BASE_URL)
+    if not base_url:
+        raise RuntimeError(
+            "Image vision base URL is empty or invalid. Set IMAGE_VISION_BASE_URL (or LM_STUDIO_URL)."
+        )
+
+    model = str(config.IMAGE_VISION_MODEL or "").strip()
+    if not model:
+        raise RuntimeError("Image vision model is empty. Set IMAGE_VISION_MODEL.")
+
+    mime = _IMAGE_MIME.get(path.suffix.lower(), "image/jpeg")
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    file_context = f"File name: {path.name}. Folder: {path.parent.name}."
+    prompt = (
+        "Describe this image for retrieval in a local RAG index. "
+        "Include visible entities, scene, activities, text shown in the image, approximate place/time cues, "
+        "and notable colors/objects. Keep it factual and concise in 4-8 sentences. "
+        f"{file_context}"
+    )
+
+    headers = {"Content-Type": "application/json"}
+    if config.IMAGE_VISION_API_KEY:
+        headers["Authorization"] = f"Bearer {config.IMAGE_VISION_API_KEY}"
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{encoded}"},
+                    },
+                ],
+            }
+        ],
+        "max_tokens": int(config.IMAGE_VISION_MAX_TOKENS),
+        "temperature": 0.2,
+    }
+
+    try:
+        response = requests.post(
+            f"{base_url}/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=max(int(config.IMAGE_VISION_TIMEOUT), 30),
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Could not analyze image via vision model at {base_url}: {exc}") from exc
+
+    data = response.json()
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("Vision model returned no choices.")
+    message = (choices[0] or {}).get("message") or {}
+    content = message.get("content", "")
+    if isinstance(content, list):
+        content = "\n".join(
+            str(item.get("text", "")).strip()
+            for item in content
+            if isinstance(item, dict) and item.get("type") in {None, "text"}
+        )
+    summary = str(content).strip()
+    if not summary:
+        raise RuntimeError("Vision model returned an empty image summary.")
+    return summary
+
+
+def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
+    summary = _summarize_image_with_llm(path)
+    exif = _extract_image_exif(path)
+
+    lines = [
+        f"Image file: {path.name}",
+        f"Folder: {path.parent.name}",
+        f"Full path: {path}",
+        "Vision summary:",
+        summary,
+    ]
+    if exif:
+        lines.append("EXIF metadata:")
+        for key in config.IMAGE_EXIF_FIELDS:
+            value = exif.get(key)
+            if value:
+                lines.append(f"- {key}: {value}")
+
+    metadata = {
+        "content_kind": "image",
+        "image_summary": summary,
+        "image_exif": exif,
+        "image_vision_model": config.IMAGE_VISION_MODEL,
+    }
+    return "\n".join(lines).strip(), metadata
+
+
 # ----------------------------------------------------------------------
 # Categories and reader registry
 # ----------------------------------------------------------------------
 
 FILE_TYPE_CATEGORIES: dict[str, list[str]] = {
     "Office": [".pdf", ".docx", ".doc", ".xlsx", ".pptx"],
+    "Images": [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".heic"],
     "Text": [".txt", ".md", ".markdown", ".rst", ".csv", ".tsv", ".log"],
     "Web": [".html", ".htm", ".xml", ".css", ".scss", ".vue", ".svelte"],
     "Data & Config": [".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"],
@@ -174,6 +325,16 @@ _OPTIONAL_DEPENDENCIES: dict[str, tuple[str, str]] = {
     ".doc": ("pywin32 + Microsoft Word (Windows)", "win32com"),
     ".xlsx": ("openpyxl", "openpyxl"),
     ".pptx": ("python-pptx", "pptx"),
+    ".jpg": ("Pillow", "PIL"),
+    ".jpeg": ("Pillow", "PIL"),
+    ".png": ("Pillow", "PIL"),
+    ".webp": ("Pillow", "PIL"),
+    ".gif": ("Pillow", "PIL"),
+    ".bmp": ("Pillow", "PIL"),
+    ".tif": ("Pillow", "PIL"),
+    ".tiff": ("Pillow", "PIL"),
+    ".avif": ("Pillow", "PIL"),
+    ".heic": ("Pillow", "PIL"),
 }
 
 CODE_EXTENSIONS = set(FILE_TYPE_CATEGORIES["Code"]) | set(FILE_TYPE_CATEGORIES["Data & Config"])
@@ -260,8 +421,19 @@ def load_document(path: Path) -> LoadedDocument:
     if not is_supported_file(resolved_path):
         raise ValueError(f"Unsupported file type: {resolved_path.suffix or '<none>'}")
 
-    reader = READERS[resolved_path.suffix.lower()]
-    content = reader(resolved_path).strip()
+    extension = resolved_path.suffix.lower()
+    extra_metadata: dict[str, Any] = {}
+    if extension in FILE_TYPE_CATEGORIES["Images"]:
+        content, extra_metadata = _read_image(resolved_path)
+    else:
+        reader = READERS[extension]
+        body = reader(resolved_path).strip()
+        content = (
+            f"Source file: {resolved_path.name}\n"
+            f"Source folder: {resolved_path.parent.name}\n"
+            f"Full path: {resolved_path}\n\n"
+            f"{body}"
+        ).strip()
     stat = resolved_path.stat()
     changed_epoch = float(stat.st_mtime)
     changed_at = datetime.fromtimestamp(changed_epoch, tz=timezone.utc).isoformat()
@@ -270,12 +442,13 @@ def load_document(path: Path) -> LoadedDocument:
         "source": str(resolved_path),
         "path": str(resolved_path),
         "filename": resolved_path.name,
-        "extension": resolved_path.suffix.lower(),
+        "extension": extension,
         "file_changed_at": changed_at,
         "file_changed_epoch": changed_epoch,
         "collection_name": collection_name,
         "content_type": collection_name,
     }
+    metadata.update(extra_metadata)
     return LoadedDocument(path=resolved_path, content=content, metadata=metadata)
 
 

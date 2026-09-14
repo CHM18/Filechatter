@@ -13,6 +13,7 @@
     <nav class="tabs">
       <button class="tab" data-panel="status">Status</button>
       <button class="tab active" data-panel="chat">Chat</button>
+      <button class="tab" data-panel="memory">Memory</button>
       <button class="tab" data-panel="databases">Databases</button>
       <button class="tab" data-panel="permissions">Permissions</button>
     </nav>
@@ -42,7 +43,6 @@
                 <button type="button" class="btn btn-small" id="chat-refresh-models" title="Reload model list">⟳</button>
               </span>
             </label>
-            <button type="button" class="btn btn-small" id="chat-test">Test connection</button>
             <div id="chat-endpoint-status" class="endpoint-status"></div>
           </div>
 
@@ -54,7 +54,6 @@
             <h3>Write to</h3>
             <div id="chat-write-dbs" class="db-checklist"></div>
           </div>
-          <button type="button" class="btn btn-small" id="chat-reset">New conversation</button>
         </aside>
 
         <div class="chat-main">
@@ -62,11 +61,26 @@
             <div class="chat-empty">Ask a question about your documents. Selected read databases are searched to ground the answer.</div>
           </div>
           <form id="chat-form" class="chat-input">
+            <button type="button" class="btn btn-reset" id="chat-reset">New conversation</button>
             <textarea id="chat-text" rows="2" placeholder="Ask about your documents…  (Enter to send, Shift+Enter for newline)"></textarea>
-            <button type="submit" class="btn btn-primary" id="chat-send">Send</button>
+            <button type="button" class="btn" id="chat-stop" disabled>Stop</button>
+            <button type="submit" class="btn btn-primary btn-send" id="chat-send">
+              <span class="send-icon" aria-hidden="true">&#9992;</span>
+              <span class="send-label">Send</span>
+            </button>
           </form>
         </div>
       </div>
+    </section>
+
+    <!-- ============ Memory panel ============ -->
+    <section id="panel-memory" class="panel">
+      <div class="panel-header">
+        <h2>Saved memory</h2>
+        <button type="button" class="btn btn-danger" id="memory-clear">Clear all</button>
+      </div>
+      <p class="hint">Filechatter automatically saves concise preferences and workflow facts. You can edit, disable, or remove each fact here.</p>
+      <div id="memory-list" class="memory-list"></div>
     </section>
 
     <!-- ============ Status panel ============ -->
@@ -185,6 +199,7 @@
   <script src="js/collections.js"></script>
   <script src="js/permissions.js"></script>
   <script src="js/chat.js"></script>
+  <script src="js/memory.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
