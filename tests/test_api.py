@@ -268,8 +268,31 @@ class TestChatStreamApi:
 
     def test_llm_models_endpoint(self, client, monkeypatch):
         class Ok:
+            base_url = "http://localhost:1234"
+            api_key = None
+            model = "qwen"
+
             def list_models(self):
                 return ["qwen", "llama"]
 
         monkeypatch.setattr("rag_server.build_provider", lambda _llm: Ok())
         assert client.get("/llm/models").json()["models"] == ["qwen", "llama"]
+
+    def test_chat_stream_preserves_unicode(self, client, monkeypatch):
+        class FakeProvider:
+            def stream(self, messages, tools=None):
+                text = "Grüße aus Köln: déjà vu."
+                yield ("token", text)
+                yield ("message", {"role": "assistant", "content": text})
+
+        monkeypatch.setattr("rag_server.build_provider", lambda _llm: FakeProvider())
+
+        response = client.post(
+            "/chat/stream",
+            json={"message": "Wie geht es?", "read_collections": [], "write_collections": []},
+        )
+
+        assert response.status_code == 200
+        assert "charset=utf-8" in response.headers["content-type"].lower()
+        events = parse_sse(response.text)
+        assert any(event.get("text") == "Grüße aus Köln: déjà vu." for event in events)

@@ -27,6 +27,7 @@ foreach ($candidate in @("venv", ".venv", "filechatter")) {
 if (-not $VenvPath) { $VenvPath = Join-Path $ScriptDir "venv" }
 $VenvPython = Join-Path $VenvPath "Scripts\python.exe"
 $RequirementsFile = Join-Path $ScriptDir "requirements.txt"
+$RequirementsDevFile = Join-Path $ScriptDir "requirements-dev.txt"
 
 function Start-BrowserWhenReady {
     if ($noBrowser) { return }
@@ -101,6 +102,15 @@ function Install-Dependencies {
         Write-Host "Failed to install dependencies." -ForegroundColor Red
         exit 1
     }
+
+    if (Test-Path $RequirementsDevFile) {
+        Write-Host "Installing development dependencies..." -ForegroundColor Gray
+        & $VenvPython -m pip install -r $RequirementsDevFile
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Failed to install development dependencies." -ForegroundColor Red
+            exit 1
+        }
+    }
     Write-Host "Dependencies installed successfully." -ForegroundColor Green
 }
 
@@ -118,7 +128,7 @@ function Test-Dependencies {
     }
     
     # Check if key packages are installed in venv
-    $requiredPackages = @("fastapi", "uvicorn", "faiss-cpu", "sqlalchemy", "langchain", "langchain-community")
+    $requiredPackages = @("fastapi", "uvicorn", "faiss-cpu", "langchain", "pytest")
     $missingPackages = @()
     
     foreach ($pkg in $requiredPackages) {

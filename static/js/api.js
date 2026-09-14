@@ -70,8 +70,8 @@ const api = {
     return this.request("/llm/test", { method: "POST" });
   },
 
-  listModels() {
-    return this.request("/llm/models");
+  listModels(force = false) {
+    return this.request(`/llm/models${force ? "?force=true" : ""}`);
   },
 
   // Stream chat events. `onEvent(evt)` is called per SSE event; resolves when the stream ends.
@@ -89,19 +89,42 @@ const api = {
       throw new Error(detail);
     }
     const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+    const decoder = new TextDecoder("utf-8");
     let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+
+    const emitFromBuffer = () => {
+      // Normalize CRLF-delimited SSE blocks to LF for consistent splitting.
+      buffer = buffer.replace(/\r\n/g, "\n");
       let index;
       while ((index = buffer.indexOf("\n\n")) >= 0) {
         const chunk = buffer.slice(0, index).trim();
         buffer = buffer.slice(index + 2);
-        if (chunk.startsWith("data:")) {
+        if (!chunk.startsWith("data:")) continue;
+        try {
           onEvent(JSON.parse(chunk.slice(5).trim()));
+        } catch (_) {
+          /* ignore malformed event payloads */
         }
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      emitFromBuffer();
+    }
+
+    // Flush any remaining decoder state for trailing multibyte code points.
+    buffer += decoder.decode();
+    emitFromBuffer();
+
+    const tail = buffer.trim();
+    if (tail.startsWith("data:")) {
+      try {
+        onEvent(JSON.parse(tail.slice(5).trim()));
+      } catch (_) {
+        /* ignore malformed trailing payload */
       }
     }
   },

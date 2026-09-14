@@ -112,21 +112,83 @@ def search_documents(query: str, collection_name: str = "all") -> list[dict[str,
     ]
 
 
-def list_sources(collection_name: str = "all") -> dict[str, Any]:
+def _compact_source(source: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": source.get("source"),
+        "source_name": source.get("source_name"),
+        "chunk_count": source.get("chunk_count", 0),
+        "first_indexed_at": source.get("first_indexed_at"),
+        "last_indexed_at": source.get("last_indexed_at"),
+        "file_changed_at": source.get("file_changed_at"),
+        "last_ingested_at": source.get("last_ingested_at"),
+    }
+
+
+def _summarize_collection(store, max_sources: int) -> dict[str, Any]:
+    manager = runtime.collections()
+    sources = store.list_sources()
+    entry = manager.get_entry(store.collection_name)
+    preview = sorted(
+        sources,
+        key=lambda item: (-int(item.get("chunk_count") or 0), str(item.get("source_name") or item.get("source") or "")),
+    )[:max_sources]
+    last_indexed_at = max((item.get("last_indexed_at") or "" for item in sources), default="") or None
+    last_ingested_at = max((item.get("last_ingested_at") or "" for item in sources), default="") or None
+    document_count = len(sources)
+    chunk_count = sum(int(item.get("chunk_count") or 0) for item in sources)
+    summary_bits = [f"{document_count} document(s)", f"{chunk_count} chunk(s)"]
+    if entry and entry.last_updated:
+        summary_bits.append(f"last updated {entry.last_updated}")
+    return {
+        "collection_name": store.collection_name,
+        "description": entry.description if entry else "",
+        "document_count": document_count,
+        "chunk_count": chunk_count,
+        "last_updated": entry.last_updated if entry else None,
+        "last_indexed_at": last_indexed_at,
+        "last_ingested_at": last_ingested_at,
+        "source_count": document_count,
+        "sources": [_compact_source(item) for item in preview],
+        "sources_omitted": max(0, document_count - len(preview)),
+        "summary": "; ".join(summary_bits),
+    }
+
+
+def list_sources(collection_name: str = "all", max_sources: int = 10) -> dict[str, Any]:
     manager = runtime.collections()
     stores = manager.selected_stores(collection_name)
-    sources: list[dict[str, Any]] = []
-    for store in stores:
-        sources.extend(store.list_sources())
-    if isinstance(collection_name, (list, tuple, set)):
-        display_name = ",".join(str(item) for item in collection_name) or "none"
-    else:
-        display_name = manager.normalize_name(collection_name)
+    limit = max(1, min(int(max_sources), 50))
+    summaries = [_summarize_collection(store, limit) for store in stores]
+
+    if isinstance(collection_name, (list, tuple, set)) or manager.normalize_name(collection_name) == "all" or len(summaries) > 1:
+        display_name = ",".join(str(item) for item in collection_name) if isinstance(collection_name, (list, tuple, set)) else manager.normalize_name(collection_name)
+        total_documents = sum(item["document_count"] for item in summaries)
+        total_chunks = sum(item["chunk_count"] for item in summaries)
+        return {
+            "collection_name": display_name or "all",
+            "total_documents": total_documents,
+            "total_chunks": total_chunks,
+            "collections": summaries,
+            "summary": f"{total_documents} document(s) across {len(summaries)} collection(s); {total_chunks} chunk(s)",
+        }
+
+    summary = summaries[0] if summaries else {
+        "collection_name": manager.normalize_name(collection_name),
+        "description": "",
+        "document_count": 0,
+        "chunk_count": 0,
+        "last_updated": None,
+        "last_indexed_at": None,
+        "last_ingested_at": None,
+        "source_count": 0,
+        "sources": [],
+        "sources_omitted": 0,
+        "summary": "0 document(s); 0 chunk(s)",
+    }
     return {
-        "collection_name": display_name,
-        "total_documents": len(sources),
-        "total_chunks": sum(store.chunk_count for store in stores),
-        "sources": sources,
+        **summary,
+        "total_documents": summary["document_count"],
+        "total_chunks": summary["chunk_count"],
     }
 
 
@@ -359,7 +421,15 @@ _register(
         handler=list_sources,
         params_schema={
             "type": "object",
-            "properties": {"collection_name": _COLLECTION_PARAM},
+            "properties": {
+                "collection_name": _COLLECTION_PARAM,
+                "max_sources": {
+                    "type": "integer",
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 50,
+                },
+            },
             "required": [],
         },
     )

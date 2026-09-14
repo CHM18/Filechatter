@@ -31,6 +31,8 @@ class FakeProvider:
         turn = self.turns.pop(0)
         for token in turn.get("tokens", []):
             yield ("token", token)
+        if turn.get("usage") is not None:
+            yield ("usage", turn["usage"])
         message = {"role": "assistant", "content": turn.get("content", "")}
         if turn.get("tool_calls"):
             message["tool_calls"] = turn["tool_calls"]
@@ -116,6 +118,16 @@ class TestReadFlow:
         payload = json.loads(tool_messages[0]["content"])
         collections = {hit["collection_name"] for hit in payload}
         assert collections == {"docs"}
+
+    def test_usage_event_is_forwarded(self, data_env, tmp_path):
+        runtime.collections().create("docs")
+        ingest(tmp_path, "docs", "The capital of France is Paris.")
+        provider = FakeProvider([
+            {"usage": {"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19}, "content": "done"},
+        ])
+        events = collect(provider, [], ["docs"], [])
+        usage = next(e for e in events if e["type"] == "usage")
+        assert usage["usage"]["total_tokens"] == 19
 
 
 class TestWriteAskFlow:
@@ -229,3 +241,14 @@ class TestErrors:
         events = collect(BrokenProvider(), [], ["docs"], [])
         assert events[-1]["type"] == "error"
         assert "endpoint down" in events[-1]["message"]
+
+    def test_stops_after_three_repeated_tool_call_rounds(self, data_env):
+        provider = FakeProvider([
+            {"tool_calls": [tool_call("c1", "search_documents", {"query": "repeat me"})]},
+            {"tool_calls": [tool_call("c2", "search_documents", {"query": "repeat me"})]},
+            {"tool_calls": [tool_call("c3", "search_documents", {"query": "repeat me"})]},
+            {"content": "should not be reached"},
+        ])
+        events = collect(provider, [], ["docs"], [])
+        assert events[-1]["type"] == "error"
+        assert "repeated tool-call rounds" in events[-1]["message"]

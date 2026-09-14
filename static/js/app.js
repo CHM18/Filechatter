@@ -13,7 +13,7 @@ const app = {
       permissionsPanel.init(),
       chatPanel.init(),
     ]);
-    chatPanel.refresh(); // Chat is the default tab.
+    await chatPanel.refresh(); // Chat is the default tab.
 
     // Keep the status badge fresh.
     setInterval(() => this.refreshStatus(), 30000);

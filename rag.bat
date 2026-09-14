@@ -11,6 +11,7 @@ cd /d "%~dp0"
 
 set "SCRIPT_DIR=%~dp0"
 set "REQ_FILE=%SCRIPT_DIR%requirements.txt"
+set "REQ_DEV_FILE=%SCRIPT_DIR%requirements-dev.txt"
 set "SERVER_FILE=%SCRIPT_DIR%rag_server.py"
 
 set "VENV_DIR=%SCRIPT_DIR%.venv_filechatter"
@@ -91,6 +92,15 @@ python -m pip install -r "%REQ_FILE%"
 if errorlevel 1 (
     echo [ERROR] Dependency installation failed.
     exit /b 1
+)
+
+if exist "%REQ_DEV_FILE%" (
+    echo [INFO] Installing/updating development dependencies from requirements-dev.txt ...
+    python -m pip install -r "%REQ_DEV_FILE%"
+    if errorlevel 1 (
+        echo [ERROR] Development dependency installation failed.
+        exit /b 1
+    )
 )
 
 echo.

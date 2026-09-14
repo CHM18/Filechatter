@@ -403,6 +403,11 @@ dialog fieldset legend { display: flex; justify-content: space-between; align-it
 .chat-bubble.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
 .chat-bubble.assistant { align-self: flex-start; background: var(--bg); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
 .assistant-text { white-space: pre-wrap; }
+.assistant-status {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  margin: 0.1rem 0 0.35rem;
+}
 .chat-error { color: var(--err); font-size: 0.88rem; margin-top: 0.4rem; }
 .assistant-text code { background: var(--bg); padding: 0 0.25rem; border-radius: 3px; font-size: 0.9em; }
 .md-code {
@@ -448,6 +453,7 @@ dialog fieldset legend { display: flex; justify-content: space-between; align-it
 .tool-card.fail { border-left-color: var(--err); }
 .tool-card-head { display: flex; gap: 0.4rem; align-items: center; }
 .tool-status { color: var(--text-dim); font-size: 0.78rem; }
+.tool-note { color: var(--text-dim); font-size: 0.82rem; margin-top: 0.35rem; }
 .tool-args {
   margin: 0.35rem 0 0;
   font-size: 0.76rem;

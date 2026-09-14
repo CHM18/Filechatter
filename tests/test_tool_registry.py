@@ -67,6 +67,9 @@ class TestIngestFile:
 
         listing = tool_registry.execute("list_sources", {"collection_name": "notes"})
         assert listing["total_documents"] == 1
+        assert listing["total_chunks"] >= 1
+        assert listing["summary"].startswith("1 document")
+        assert len(listing["sources"]) == 1
 
     def test_updates_last_updated(self, data_env, tmp_path):
         source = tmp_path / "stamp.txt"
@@ -194,6 +197,18 @@ class TestClearIndex:
         assert result["deleted_chunks"] > 0
         listing = tool_registry.execute("list_sources", {"collection_name": "partial"})
         assert listing["total_documents"] == 1
+
+    def test_list_sources_is_compact(self, data_env, tmp_path):
+        runtime.collections().create("bulk")
+        for index in range(12):
+            source = tmp_path / f"doc_{index}.txt"
+            source.write_text(f"document {index}", encoding="utf-8")
+            tool_registry.execute("ingest_file", {"path": str(source), "collection_name": "bulk"})
+
+        listing = tool_registry.execute("list_sources", {"collection_name": "bulk", "max_sources": 5})
+        assert listing["total_documents"] == 12
+        assert len(listing["sources"]) == 5
+        assert listing["sources_omitted"] == 7
 
 
 class TestDocumentSupport:

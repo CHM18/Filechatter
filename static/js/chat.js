@@ -14,6 +14,8 @@ const chatPanel = {
   sessionId: null,
   busy: false,
   currentTurn: null, // {contentEl, toolCards: {id: el}}
+  modelsLoadedKey: null,
+  modelsLoadedAt: 0,
 
   async init() {
     document.getElementById("chat-form").addEventListener("submit", (e) => {
@@ -33,7 +35,7 @@ const chatPanel = {
     });
     document.getElementById("chat-base-url").addEventListener("change", () => this.saveEndpoint());
     document.getElementById("chat-model").addEventListener("change", () => this.saveEndpoint());
-    document.getElementById("chat-refresh-models").addEventListener("click", () => this.loadModels());
+    document.getElementById("chat-refresh-models").addEventListener("click", () => this.loadModels(true));
     document.getElementById("chat-test").addEventListener("click", () => this.testConnection());
     document.getElementById("chat-reset").addEventListener("click", () => this.resetConversation());
   },
@@ -46,6 +48,7 @@ const chatPanel = {
       ]);
       this.renderEndpoint();
       this.renderDbSelectors();
+      await this.maybeLoadModels();
     } catch (error) {
       showToast(`Failed to load chat config: ${error.message}`);
     }
@@ -61,34 +64,63 @@ const chatPanel = {
     modelSelect.innerHTML = `<option value="${escapeHtml(llm.model)}">${escapeHtml(llm.model)}</option>`;
   },
 
+  currentModelKey() {
+    const provider = document.getElementById("chat-provider").value;
+    const baseUrl = document.getElementById("chat-base-url").value.trim();
+    return `${provider}|${baseUrl}`;
+  },
+
+  async maybeLoadModels() {
+    const key = this.currentModelKey();
+    const stale = Date.now() - this.modelsLoadedAt > 60_000;
+    if (this.modelsLoadedKey !== key || stale || !document.getElementById("chat-model").options.length) {
+      await this.loadModels(false);
+    }
+  },
+
   async saveEndpoint() {
+    const provider = document.getElementById("chat-provider").value;
+    const baseInput = document.getElementById("chat-base-url");
+    let baseUrl = baseInput.value.trim();
+    if (!baseUrl && PROVIDER_DEFAULTS[provider]) {
+      baseUrl = PROVIDER_DEFAULTS[provider];
+      baseInput.value = baseUrl;
+    }
+    if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
+      baseUrl = `http://${baseUrl.replace(/^\/+/, "")}`;
+      baseInput.value = baseUrl;
+    }
+
     const changes = {
       llm: {
-        provider: document.getElementById("chat-provider").value,
-        base_url: document.getElementById("chat-base-url").value.trim(),
+        provider,
+        base_url: baseUrl,
         model: document.getElementById("chat-model").value,
       },
     };
     try {
       this.settings = await api.updateSettings(changes);
+      this.modelsLoadedKey = null;
       app.refreshStatus();
     } catch (error) {
       showToast(`Could not save endpoint: ${error.message}`);
     }
   },
 
-  async loadModels() {
+  async loadModels(force = false) {
     const status = document.getElementById("chat-endpoint-status");
-    status.textContent = "Loading models…";
+    status.textContent = force ? "Reloading models…" : "Loading models…";
     status.className = "endpoint-status";
     try {
       await this.saveEndpoint(); // persist base_url first so the server queries the right host
-      const models = (await api.listModels()).models || [];
+      const models = (await api.listModels(force)).models || [];
       const select = document.getElementById("chat-model");
       const current = this.settings.llm.model;
       select.innerHTML = models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
       if (models.includes(current)) select.value = current;
       else if (models.length) this.saveEndpoint();
+      this.modelsLoadedKey = this.currentModelKey();
+      this.modelsLoadedAt = Date.now();
       status.textContent = `${models.length} model(s) available`;
       status.classList.add("ok");
     } catch (error) {
@@ -195,10 +227,22 @@ const chatPanel = {
     tools.className = "tool-cards";
     const content = document.createElement("div");
     content.className = "assistant-text";
-    turn.append(tools, content);
+    const status = document.createElement("div");
+    status.className = "assistant-status";
+    status.textContent = "Processing prompt…";
+    turn.append(tools, status, content);
     messages.appendChild(turn);
     messages.scrollTop = messages.scrollHeight;
-    this.currentTurn = { turnEl: turn, toolsEl: tools, contentEl: content, toolCards: {}, raw: "", sources: new Map() };
+    this.currentTurn = {
+      turnEl: turn,
+      toolsEl: tools,
+      statusEl: status,
+      contentEl: content,
+      toolCards: {},
+      raw: "",
+      sources: new Map(),
+      usage: null,
+    };
   },
 
   async send() {
@@ -218,6 +262,7 @@ const chatPanel = {
     this.busy = true;
     this.setSending(true);
     this.startAssistantTurn();
+    this.currentTurn.statusEl.textContent = "Processing prompt…";
     const body = {
       session_id: this.sessionId,
       read_collections: this.selectedDbs("read"),
@@ -243,7 +288,12 @@ const chatPanel = {
       case "token":
         turn.raw += event.text;
         turn.contentEl.textContent = turn.raw;
+        turn.statusEl.textContent = "Generating response…";
         this.scroll();
+        break;
+      case "usage":
+        turn.usage = event.usage || null;
+        turn.statusEl.textContent = this.formatUsage(turn.usage);
         break;
       case "tool_call":
         this.renderToolCard(event);
@@ -257,13 +307,29 @@ const chatPanel = {
         break;
       case "done":
         if (!turn.raw.trim() && event.content) turn.raw = event.content;
-        turn.contentEl.innerHTML = renderMarkdown(turn.raw);
+        if (turn.raw.trim()) {
+          turn.contentEl.innerHTML = renderMarkdown(turn.raw);
+        } else {
+          turn.contentEl.innerHTML = '<div class="chat-error">No answer returned.</div>';
+          turn.statusEl.textContent = "No answer returned.";
+        }
         this.renderSources();
+        if (turn.usage) turn.statusEl.textContent = this.formatUsage(turn.usage);
         break;
       case "error":
+        turn.statusEl.textContent = "Failed";
         turn.contentEl.innerHTML += `<div class="chat-error">${escapeHtml(event.message)}</div>`;
         break;
     }
+  },
+
+  formatUsage(usage) {
+    if (!usage) return "Request complete";
+    const pieces = [];
+    if (usage.prompt_tokens != null) pieces.push(`prompt ${usage.prompt_tokens}`);
+    if (usage.completion_tokens != null) pieces.push(`completion ${usage.completion_tokens}`);
+    if (usage.total_tokens != null) pieces.push(`tokens used: ${usage.total_tokens}`);
+    return pieces.length ? pieces.join(" · ") : "Request complete";
   },
 
   renderToolCard(event) {
@@ -284,10 +350,30 @@ const chatPanel = {
     card.classList.add(event.ok ? "ok" : "fail");
     const status = card.querySelector(".tool-status");
     let summary = "done";
-    if (Array.isArray(event.result)) summary = `${event.result.length} result(s)`;
-    else if (!event.ok) summary = "failed";
+    let note = "";
+    if (Array.isArray(event.result)) {
+      summary = event.result.length ? `${event.result.length} result(s)` : "empty result";
+      if (!event.result.length) note = "No results returned.";
+    } else if (event.result && typeof event.result === "object") {
+      summary = Object.keys(event.result).length ? "done" : "empty result";
+      if (summary === "empty result") note = "No result payload returned.";
+    } else if (event.result === null || event.result === undefined || event.result === "") {
+      summary = "empty result";
+      note = "No result returned.";
+    }
+    if (!event.ok) {
+      summary = "failed";
+      note = typeof event.result === "string" && event.result ? event.result : "Tool call failed or timed out.";
+    }
     status.textContent = summary;
     card.title = typeof event.result === "string" ? event.result : JSON.stringify(event.result);
+    card.querySelector(".tool-note")?.remove();
+    if (note) {
+      const info = document.createElement("div");
+      info.className = "tool-note";
+      info.textContent = note;
+      card.appendChild(info);
+    }
   },
 
   renderConfirmations(pending) {
