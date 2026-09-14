@@ -14,6 +14,9 @@ const chatPanel = {
   sessionId: null,
   busy: false,
   currentTurn: null, // {contentEl, toolCards: {id: el}}
+  models: [],
+  modelsKey: null,
+  modelsLoading: null,
   modelsLoadedKey: null,
   modelsLoadedAt: 0,
 
@@ -31,17 +34,17 @@ const chatPanel = {
     document.getElementById("chat-provider").addEventListener("change", (e) => {
       const base = PROVIDER_DEFAULTS[e.target.value];
       if (base) document.getElementById("chat-base-url").value = base;
-      this.updateEndpointAndModels();
+      this.loadModels(true);
     });
-    document.getElementById("chat-base-url").addEventListener("change", () => this.updateEndpointAndModels());
+    document.getElementById("chat-base-url").addEventListener("change", () => this.loadModels(true));
     document.getElementById("chat-model").addEventListener("change", () => this.saveEndpoint());
     document.getElementById("chat-refresh-models").addEventListener("click", () => this.loadModels(true));
-    document.getElementById("chat-test").addEventListener("click", () => this.testConnection());
     document.getElementById("chat-reset").addEventListener("click", () => this.resetConversation());
     document.getElementById("chat-stop").addEventListener("click", () => this.stopCurrentResponse());
   },
 
   async refresh() {
+    if (this.busy) return;
     try {
       [this.settings, this.collections] = await Promise.all([
         api.settings(),
@@ -117,28 +120,6 @@ const chatPanel = {
       app.refreshStatus();
     } catch (error) {
       showToast(`Could not save endpoint: ${error.message}`);
-    }
-  },
-
-  async loadModels(force = false) {
-    const status = document.getElementById("chat-endpoint-status");
-    status.textContent = force ? "Reloading models…" : "Loading models…";
-    status.className = "endpoint-status";
-    try {
-      await this.saveEndpoint(); // persist base_url first so the server queries the right host
-      const models = (await api.listModels(force)).models || [];
-      const select = document.getElementById("chat-model");
-      const current = this.settings.llm.model;
-      select.innerHTML = models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
-      if (models.includes(current)) select.value = current;
-      else if (models.length) this.saveEndpoint();
-      this.modelsLoadedKey = this.currentModelKey();
-      this.modelsLoadedAt = Date.now();
-      status.textContent = `${models.length} model(s) available`;
-      status.classList.add("ok");
-    } catch (error) {
-      status.textContent = error.message;
-      status.classList.add("err");
     }
   },
 
@@ -228,6 +209,7 @@ const chatPanel = {
   // ---------- Conversation ----------
 
   resetConversation() {
+    if (this.busy) this.stopCurrentResponse();
     this.sessionId = null;
     this.currentTurn = null;
     document.getElementById("chat-messages").innerHTML =
@@ -287,6 +269,7 @@ const chatPanel = {
   async runStream(extra) {
     this.busy = true;
     this.stopping = false;
+    this.streamAbortController = new AbortController();
     this.setSending(true);
     this.startAssistantTurn();
     this.currentTurn.statusEl.textContent = "Processing prompt…";
@@ -301,7 +284,7 @@ const chatPanel = {
         signal: this.streamAbortController.signal,
       });
     } catch (error) {
-      if (!this.stopping && error.name !== "AbortError") {
+      if (!this.stopping && error.name !== "AbortError" && this.currentTurn) {
         this.currentTurn.contentEl.innerHTML += `<div class="chat-error">Error: ${escapeHtml(error.message)}</div>`;
       }
     } finally {
@@ -315,6 +298,8 @@ const chatPanel = {
   async stopCurrentResponse() {
     if (!this.busy) return;
     this.stopping = true;
+    const controller = this.streamAbortController;
+    controller?.abort();
     const stopButton = document.getElementById("chat-stop");
     stopButton.disabled = true;
     stopButton.textContent = "Stopping…";
@@ -325,12 +310,13 @@ const chatPanel = {
     } catch (error) {
       showToast(`Cancel request failed: ${error.message}`);
     } finally {
-      this.streamAbortController?.abort();
+      controller?.abort();
     }
   },
 
   handleEvent(event) {
     const turn = this.currentTurn;
+    if (!turn) return;
     switch (event.type) {
       case "session":
         this.sessionId = event.session_id;

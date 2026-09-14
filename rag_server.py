@@ -51,10 +51,27 @@ SENSITIVE_MEMORY_RE = re.compile(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    warmup = threading.Thread(
+        target=_warm_collection_runtime,
+        name="collection-runtime-warmup",
+        daemon=True,
+    )
+    warmup.start()
     try:
         yield
     finally:
         runtime.collections().close_all()
+
+
+def _warm_collection_runtime() -> None:
+    """Load the shared embedding model after the HTTP server is available."""
+    try:
+        manager = runtime.collections()
+        for entry in manager.list_entries():
+            manager.get_store(entry.name)
+            break
+    except Exception:
+        logger.exception("Collection runtime warmup failed")
 
 
 # Initialize FastAPI app
@@ -78,6 +95,8 @@ async def no_cache_ui_assets(request, call_next):
     response = await call_next(request)
     if request.url.path == "/" or request.url.path.startswith("/ui"):
         response.headers["Cache-Control"] = "no-cache"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 

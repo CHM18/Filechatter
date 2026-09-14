@@ -81,26 +81,25 @@ if errorlevel 1 (
 )
 
 echo.
-echo [INFO] Installing/updating dependencies from requirements.txt ...
-python -m pip install --upgrade pip
+echo [INFO] Checking installed dependencies ...
+python -m pip check >nul 2>nul
 if errorlevel 1 (
-    echo [ERROR] pip upgrade failed.
-    exit /b 1
-)
-
-python -m pip install -r "%REQ_FILE%"
-if errorlevel 1 (
-    echo [ERROR] Dependency installation failed.
-    exit /b 1
-)
-
-if exist "%REQ_DEV_FILE%" (
-    echo [INFO] Installing/updating development dependencies from requirements-dev.txt ...
-    python -m pip install -r "%REQ_DEV_FILE%"
+    echo [INFO] Installing dependencies from requirements.txt ...
+    python -m pip install -r "%REQ_FILE%"
     if errorlevel 1 (
-        echo [ERROR] Development dependency installation failed.
+        echo [ERROR] Dependency installation failed.
         exit /b 1
     )
+    if exist "%REQ_DEV_FILE%" (
+        echo [INFO] Installing development dependencies from requirements-dev.txt ...
+        python -m pip install -r "%REQ_DEV_FILE%"
+        if errorlevel 1 (
+            echo [ERROR] Development dependency installation failed.
+            exit /b 1
+        )
+    )
+) else (
+    echo [INFO] Dependencies already satisfied; skipping installation.
 )
 
 echo.

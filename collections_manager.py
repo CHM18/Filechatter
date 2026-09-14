@@ -18,9 +18,11 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import threading
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -411,12 +413,33 @@ class CollectionsManager:
         entry = self.get_entry(normalized)
         if entry is None:
             raise KeyError(f"Unknown collection: {normalized}")
-        store = self.get_store(normalized)
+        document_count, chunk_count = self._read_counts(normalized)
         return {
             **entry.to_dict(),
-            "document_count": len(store.list_sources()),
-            "chunk_count": store.chunk_count,
+            "document_count": document_count,
+            "chunk_count": chunk_count,
         }
 
     def describe_all(self) -> list[dict[str, Any]]:
         return [self.describe(entry.name) for entry in self.list_entries()]
+
+    def _read_counts(self, name: str) -> tuple[int, int]:
+        """Read persisted counts without loading the shared embedding model."""
+        collection_dir = self.data_dir / name
+        info_path = collection_dir / "info.xml"
+        try:
+            root = ET.parse(info_path).getroot()
+            return int(root.findtext("documents", "0")), int(root.findtext("chunks", "0"))
+        except (OSError, ET.ParseError, TypeError, ValueError):
+            pass
+
+        sqlite_path = collection_dir / "rag.sqlite3"
+        try:
+            with sqlite3.connect(sqlite_path) as connection:
+                documents = connection.execute(
+                    "SELECT COUNT(DISTINCT source) FROM chunks"
+                ).fetchone()[0]
+                chunks = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            return int(documents), int(chunks)
+        except (OSError, sqlite3.Error):
+            return 0, 0

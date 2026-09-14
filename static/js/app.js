@@ -7,17 +7,26 @@ const app = {
       tab.addEventListener("click", () => this.showPanel(tab.dataset.panel));
     });
 
+    await Promise.all([this.refreshStatus(), chatPanel.init()]);
+    const chatRefresh = chatPanel.refresh();
     await Promise.all([
-      this.refreshStatus(),
       collectionsPanel.init(),
       permissionsPanel.init(),
-      chatPanel.init(),
       memoryPanel.init(),
+      chatRefresh,
     ]);
-    await chatPanel.refresh(); // Chat is the default tab.
 
     // Keep the status badge fresh.
     setInterval(() => this.refreshStatus(), 30000);
+    // Refresh selectors while the server finishes background warmup.
+    let startupRefreshes = 0;
+    const refreshStartupData = async () => {
+      if (startupRefreshes++ >= 12) return;
+      await Promise.all([chatPanel.refresh(), collectionsPanel.refresh()]);
+      if (chatPanel.models.length && chatPanel.collections.length) return;
+      setTimeout(refreshStartupData, 2500);
+    };
+    setTimeout(refreshStartupData, 1500);
   },
 
   showPanel(name) {
