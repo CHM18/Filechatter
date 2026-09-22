@@ -128,30 +128,38 @@ def _summarize_collection(store, max_sources: int) -> dict[str, Any]:
     manager = runtime.collections()
     sources = store.list_sources()
     entry = manager.get_entry(store.collection_name)
+    # Alphabetical by name is easier to scan than a chunk-count ranking.
     preview = sorted(
         sources,
-        key=lambda item: (-int(item.get("chunk_count") or 0), str(item.get("source_name") or item.get("source") or "")),
+        key=lambda item: str(item.get("source_name") or item.get("source") or "").lower(),
     )[:max_sources]
-    last_indexed_at = max((item.get("last_indexed_at") or "" for item in sources), default="") or None
-    last_ingested_at = max((item.get("last_ingested_at") or "" for item in sources), default="") or None
     document_count = len(sources)
     chunk_count = sum(int(item.get("chunk_count") or 0) for item in sources)
+    shown_count = len(preview)
+    omitted_count = max(0, document_count - shown_count)
+    truncated = omitted_count > 0
     summary_bits = [f"{document_count} document(s)", f"{chunk_count} chunk(s)"]
     if entry and entry.last_updated:
         summary_bits.append(f"last updated {entry.last_updated}")
+    summary = "; ".join(summary_bits)
+    if truncated:
+        summary += (
+            f". Only {shown_count} of {document_count} document(s) are listed below (sorted alphabetically by name);"
+            f" {omitted_count} more are indexed but not shown in this result."
+        )
     return {
         "collection_name": store.collection_name,
         "description": entry.description if entry else "",
         "document_count": document_count,
         "chunk_count": chunk_count,
         "last_updated": entry.last_updated if entry else None,
-        "last_indexed_at": last_indexed_at,
-        "last_ingested_at": last_ingested_at,
-        "source_count": document_count,
         "sources": [_compact_source(item) for item in preview],
-        "sources_omitted": max(0, document_count - len(preview)),
-        "summary": "; ".join(summary_bits),
+        "sources_shown": shown_count,
+        "sources_omitted": omitted_count,
+        "truncated": truncated,
+        "summary": summary,
     }
+
 
 
 def list_sources(collection_name: str = "all", max_sources: int = 10) -> dict[str, Any]:
@@ -164,12 +172,20 @@ def list_sources(collection_name: str = "all", max_sources: int = 10) -> dict[st
         display_name = ",".join(str(item) for item in collection_name) if isinstance(collection_name, (list, tuple, set)) else manager.normalize_name(collection_name)
         total_documents = sum(item["document_count"] for item in summaries)
         total_chunks = sum(item["chunk_count"] for item in summaries)
+        truncated_collections = [item["collection_name"] for item in summaries if item.get("truncated")]
+        summary_text = f"{total_documents} document(s) across {len(summaries)} collection(s); {total_chunks} chunk(s)"
+        if truncated_collections:
+            summary_text += (
+                f". Source lists are only partially shown for: {', '.join(truncated_collections)}"
+                " (the true document counts above already include the ones not listed)."
+            )
         return {
             "collection_name": display_name or "all",
             "total_documents": total_documents,
             "total_chunks": total_chunks,
             "collections": summaries,
-            "summary": f"{total_documents} document(s) across {len(summaries)} collection(s); {total_chunks} chunk(s)",
+            "truncated": bool(truncated_collections),
+            "summary": summary_text,
         }
 
     summary = summaries[0] if summaries else {
@@ -178,17 +194,20 @@ def list_sources(collection_name: str = "all", max_sources: int = 10) -> dict[st
         "document_count": 0,
         "chunk_count": 0,
         "last_updated": None,
-        "last_indexed_at": None,
-        "last_ingested_at": None,
-        "source_count": 0,
         "sources": [],
+        "sources_shown": 0,
         "sources_omitted": 0,
+        "truncated": False,
         "summary": "0 document(s); 0 chunk(s)",
     }
+    # Rename document_count/chunk_count to total_documents/total_chunks here so the
+    # field names match the "all collections" response shape instead of duplicating it.
+    document_count = summary.pop("document_count")
+    chunk_count = summary.pop("chunk_count")
     return {
         **summary,
-        "total_documents": summary["document_count"],
-        "total_chunks": summary["chunk_count"],
+        "total_documents": document_count,
+        "total_chunks": chunk_count,
     }
 
 
@@ -416,7 +435,13 @@ _register(
 _register(
     ToolSpec(
         name="list_sources",
-        description="List indexed sources and chunk counts in the local store.",
+        description=(
+            "Return an alphabetically-sorted EXCERPT (not the full list) of indexed sources and chunk "
+            "counts in the local store: only the first max_sources entries per collection are included "
+            "(default 10, max 50), even if a collection holds many more documents. The true totals are "
+            "always in 'total_documents'/'total_chunks' (or 'document_count'/'chunk_count' per collection), "
+            "and 'sources_omitted'/'truncated' show whether entries were left out of the returned excerpt."
+        ),
         access=READ,
         handler=list_sources,
         params_schema={
@@ -428,6 +453,7 @@ _register(
                     "default": 10,
                     "minimum": 1,
                     "maximum": 50,
+                    "description": "Maximum number of sources to return per collection; increase to reduce truncation.",
                 },
             },
             "required": [],

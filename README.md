@@ -217,6 +217,8 @@ Recommended workflow for large ingests:
 - `file_changed_at`: file modification timestamp used for version checks
 - `last_ingested_at`: when the source was last written to the RAG index
 
+`list_sources` caps the returned `sources` list at `max_sources` (default 10, max 50) per collection, sorted alphabetically by name, since an index can contain thousands of documents. `total_documents`/`total_chunks` (single collection) or the per-collection `document_count`/`chunk_count` (in the `collections` breakdown for `collection_name="all"`) always report the real total, independent of the cap; `sources_shown`, `sources_omitted`, and a `truncated` flag say whether entries were left out, and the `summary` text spells this out too so the requesting LLM does not mistake the excerpt for the full source list.
+
 `clear_index` supports targeted and bulk deletes:
 
 - Clear one document from one collection:
