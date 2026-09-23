@@ -43,15 +43,15 @@ python ./rag_server.py
 
 The server will start on `http://localhost:8000` and `rag.ps1` opens the web UI (`http://localhost:8000/ui/`) in your default browser once the server is healthy (suppress with `-noBrowser`). View the API docs at `http://localhost:8000/docs`.
 
-Indexed data is persisted under `./data/<collection_name>/` by default. Collection metadata (description, allowed file types, `last_updated`) lives in `./data/collections.json`; existing collection directories are discovered and registered automatically on first start.
+Indexed data is persisted under `./data/<collection_name>/` by default. Collection metadata (description, allowed file types, read/write access, retrieval weights, and `last_updated`) lives in `./data/collections.json`; existing collection directories are discovered and registered automatically on first start.
 
 ### Web UI
 
 `http://localhost:8000/ui/` provides:
 
-- **Chat** - talk to a local model with your documents as grounding; pick which databases are read from and written to, watch tool calls, and approve writes inline
+- **Chat** - talk to a local model with your documents as grounding; database read/write access comes from the Database settings, with tool calls and write approvals shown inline
 - **Status** - server health, LM Studio connectivity, collection/document/chunk totals, active configuration
-- **Databases** - list all RAG databases with live document/chunk counts, create new databases (name, description, allowed file types), delete databases
+- **Databases** - list all RAG databases with live document/chunk counts, create new databases, configure read/write access and semantic/keyword/metadata retrieval weights, apply settings per database or in bulk, and delete databases
 - **Permissions** - Ask/Allow/Deny control over the tools the model may call
 
 ### Chat
@@ -64,8 +64,9 @@ MCP hosts, and the web UI is their administration console.
 Configure the endpoint in the Chat sidebar (provider, base URL, model) and press
 **Reload models** (⟳). Then:
 
-- **Read from / Write to** - tick which databases each message may read and write. Reads
-  are scoped to the selected databases automatically (the model never has to name one).
+- **Read from / Write to** - database access is controlled centrally in the Databases tab. The
+  backend filters every chat request against those access flags, so the model and browser cannot
+  widen the scope by submitting different collection names.
 - **Grounding** - the model calls `search_documents` against your read databases and cites
   what it used.
 - **Writes** - respect the Permissions settings. With *Ask* (the default for writes), each
@@ -316,8 +317,8 @@ python -m cli clear --yes
 - `GET /health` - Server health check
 - `GET /ui/` - Web frontend (status + database management)
 - `GET /collections` - Collection metadata with live document/chunk counts
-- `POST /collections` - Create a collection (`name`, `description`, `allowed_extensions`)
-- `PATCH /collections/{name}` - Update description / allowed file types
+- `POST /collections` - Create a collection (`name`, `description`, `allowed_extensions`, `read_allowed`, `write_allowed`, `semantic_weight`, `keyword_weight`, `metadata_weight`)
+- `PATCH /collections/{name}` - Update description, allowed file types, access flags, and retrieval weights
 - `DELETE /collections/{name}?confirm=true` - Delete a collection and its data
 - `GET /tools` - List tools with read/write classification, parameter schemas, and resolved permission; `?visible=true` excludes denied tools
 - `POST /tools/{name}` - Execute a tool, enforcing permissions (body: `{"arguments": {...}, "client": "api"|"mcp"}`); returns 403 when denied
@@ -509,11 +510,7 @@ Contributions welcome! Feel free to submit issues and pull requests.
 
 ## To Do
 - Replace custommade text splitter by llamaindex (or langchain?) text splitter (more complex but better quality). could solve this pblm as well: make it more robust: when many files are uploaded only some hits are returned for a key-word, not all
-- make the collection selection wired through to the backend (currently only the chat via web-UI respects them)
 - Add architectural details to source code project (dependency graph, classes...) so that the model gets a better overview
 - make foto ingestion more meaningful, e.g. by multiple passes so that the llm learns who shown in the picture via meta data (and some guessing). Alternative: provide golden samples with persons taked with their names. Further: add a way to provide context information, e.g. birth dates, so that a birthday party can be assigned to a specific person...
 - add the possibility to configure cron-jobs for ingestion runs per collection
-- make the retrieval characteristics adjustable per collection, e.g. (copilot suggestion):
-  - source code: semantic 0.75, keyword 2.5, metadata 6
-  - prose:       semantic 2.0,  keyword 1.0, metadata 3
-  - photos:      semantic 2.0,  keyword 1.0, metadata 4
+- Multi-user access to server: add MCP client authentication and/or identity. Therefore the fine grain access control to the RAG needs to be made configurable per user.

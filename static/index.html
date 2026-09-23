@@ -46,14 +46,6 @@
             <div id="chat-endpoint-status" class="endpoint-status"></div>
           </div>
 
-          <div class="side-group">
-            <h3>Read from</h3>
-            <div id="chat-read-dbs" class="db-checklist"></div>
-          </div>
-          <div class="side-group">
-            <h3>Write to</h3>
-            <div id="chat-write-dbs" class="db-checklist"></div>
-          </div>
         </aside>
 
         <div class="chat-main">
@@ -106,7 +98,10 @@
     <section id="panel-databases" class="panel">
       <div class="panel-header">
         <h2>RAG databases</h2>
-        <button class="btn btn-primary" id="btn-new-collection">+ New database</button>
+        <div class="panel-actions">
+          <button class="btn btn-primary" id="btn-apply-all">Apply all</button>
+          <button class="btn btn-primary" id="btn-new-collection">+ New database</button>
+        </div>
       </div>
       <div id="collections-list" class="collections-list"></div>
     </section>
@@ -165,6 +160,27 @@
         <textarea id="create-description" rows="2"
                   placeholder="What belongs in this database? (also guides the model when auto-selecting a write target)"></textarea>
       </label>
+      <div class="dialog-grid">
+        <label class="switch-inline"><input type="checkbox" id="create-read-enabled" checked> Read-enabled</label>
+        <label class="switch-inline"><input type="checkbox" id="create-write-enabled"> Write-enabled</label>
+      </div>
+      <div class="weight-editor dialog-weights">
+        <label class="slider-row">
+          <span>Semantic</span>
+          <input type="range" id="create-semantic-weight" min="0" max="10" step="0.1" value="1.0">
+          <b id="create-semantic-value">1.0</b>
+        </label>
+        <label class="slider-row">
+          <span>Keyword</span>
+          <input type="range" id="create-keyword-weight" min="0" max="10" step="0.1" value="2.0">
+          <b id="create-keyword-value">2.0</b>
+        </label>
+        <label class="slider-row">
+          <span>Metadata</span>
+          <input type="range" id="create-metadata-weight" min="0" max="10" step="0.1" value="4.0">
+          <b id="create-metadata-value">4.0</b>
+        </label>
+      </div>
       <fieldset>
         <legend>
           <span>Allowed file types <span class="hint">(none selected = all supported types)</span></span>
@@ -195,11 +211,11 @@
 
   <div id="toast" class="toast"></div>
 
-  <script src="js/api.js?v=20260914"></script>
-  <script src="js/collections.js?v=20260914"></script>
-  <script src="js/permissions.js?v=20260914"></script>
-  <script src="js/chat.js?v=20260914"></script>
-  <script src="js/memory.js?v=20260914"></script>
-  <script src="js/app.js?v=20260914"></script>
+  <script src="js/api.js?v=20260923"></script>
+  <script src="js/collections.js?v=20260923"></script>
+  <script src="js/permissions.js?v=20260923"></script>
+  <script src="js/chat.js?v=20260923"></script>
+  <script src="js/memory.js?v=20260923"></script>
+  <script src="js/app.js?v=20260923"></script>
 </body>
 </html>

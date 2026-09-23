@@ -22,7 +22,10 @@ const app = {
     let startupRefreshes = 0;
     const refreshStartupData = async () => {
       if (startupRefreshes++ >= 12) return;
-      await Promise.all([chatPanel.refresh(), collectionsPanel.refresh()]);
+      // Chat refresh also loads the collection list for its selectors. Do not
+      // re-render the Database tab here: model warmup can take several cycles,
+      // and that would discard unsaved collection slider changes.
+      await chatPanel.refresh();
       if (chatPanel.models.length && chatPanel.collections.length) return;
       setTimeout(refreshStartupData, 2500);
     };

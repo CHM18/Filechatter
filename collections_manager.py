@@ -15,6 +15,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -107,6 +108,37 @@ class CollectionEntry:
     allowed_extensions: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=utc_now_iso)
     last_updated: str | None = None
+    read_allowed: bool = True
+    write_allowed: bool = False
+    semantic_weight: float = 1.0
+    keyword_weight: float = 2.0
+    metadata_weight: float = 4.0
+
+    @staticmethod
+    def _coerce_bool(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        if value is None:
+            return default
+        return bool(value)
+
+    @staticmethod
+    def _coerce_weight(value: Any, default: float) -> float:
+        if value is None:
+            return default
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return default
+        if not math.isfinite(numeric):
+            return default
+        return max(0.0, min(10.0, numeric))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +147,11 @@ class CollectionEntry:
             "allowed_extensions": list(self.allowed_extensions),
             "created_at": self.created_at,
             "last_updated": self.last_updated,
+            "read_allowed": self.read_allowed,
+            "write_allowed": self.write_allowed,
+            "semantic_weight": float(self.semantic_weight),
+            "keyword_weight": float(self.keyword_weight),
+            "metadata_weight": float(self.metadata_weight),
         }
 
     @classmethod
@@ -125,6 +162,11 @@ class CollectionEntry:
             allowed_extensions=normalize_extensions(data.get("allowed_extensions")),
             created_at=str(data.get("created_at") or utc_now_iso()),
             last_updated=data.get("last_updated"),
+            read_allowed=cls._coerce_bool(data.get("read_allowed"), True),
+            write_allowed=cls._coerce_bool(data.get("write_allowed"), False),
+            semantic_weight=cls._coerce_weight(data.get("semantic_weight"), 1.0),
+            keyword_weight=cls._coerce_weight(data.get("keyword_weight"), 2.0),
+            metadata_weight=cls._coerce_weight(data.get("metadata_weight"), 4.0),
         )
 
     def allows_extension(self, extension: str) -> bool:
@@ -252,6 +294,11 @@ class CollectionsManager:
         name: str,
         description: str = "",
         allowed_extensions: list[str] | None = None,
+        read_allowed: bool = True,
+        write_allowed: bool = False,
+        semantic_weight: float = 1.0,
+        keyword_weight: float = 2.0,
+        metadata_weight: float = 4.0,
     ) -> CollectionEntry:
         normalized = name.strip().lower()
         self.validate_name(normalized)
@@ -262,11 +309,17 @@ class CollectionsManager:
                 name=normalized,
                 description=description.strip(),
                 allowed_extensions=normalize_extensions(allowed_extensions),
+                read_allowed=CollectionEntry._coerce_bool(read_allowed, True),
+                write_allowed=CollectionEntry._coerce_bool(write_allowed, False),
+                semantic_weight=CollectionEntry._coerce_weight(semantic_weight, 1.0),
+                keyword_weight=CollectionEntry._coerce_weight(keyword_weight, 2.0),
+                metadata_weight=CollectionEntry._coerce_weight(metadata_weight, 4.0),
             )
             self._entries[normalized] = entry
             self._save()
         # Materialize the store directory right away so the collection is usable.
-        self.get_store(normalized)
+        store = self.get_store(normalized)
+        store.apply_collection_settings(entry.to_dict())
         return entry
 
     def ensure(self, name: str) -> CollectionEntry:
@@ -296,6 +349,11 @@ class CollectionsManager:
         name: str,
         description: str | None = None,
         allowed_extensions: list[str] | None = None,
+        read_allowed: bool | None = None,
+        write_allowed: bool | None = None,
+        semantic_weight: float | None = None,
+        keyword_weight: float | None = None,
+        metadata_weight: float | None = None,
     ) -> CollectionEntry:
         normalized = self.normalize_name(name)
         with self._lock:
@@ -306,7 +364,20 @@ class CollectionsManager:
                 entry.description = description.strip()
             if allowed_extensions is not None:
                 entry.allowed_extensions = normalize_extensions(allowed_extensions)
+            if read_allowed is not None:
+                entry.read_allowed = CollectionEntry._coerce_bool(read_allowed, entry.read_allowed)
+            if write_allowed is not None:
+                entry.write_allowed = CollectionEntry._coerce_bool(write_allowed, entry.write_allowed)
+            if semantic_weight is not None:
+                entry.semantic_weight = CollectionEntry._coerce_weight(semantic_weight, entry.semantic_weight)
+            if keyword_weight is not None:
+                entry.keyword_weight = CollectionEntry._coerce_weight(keyword_weight, entry.keyword_weight)
+            if metadata_weight is not None:
+                entry.metadata_weight = CollectionEntry._coerce_weight(metadata_weight, entry.metadata_weight)
             self._save()
+            store = self._stores.get(normalized)
+            if store is not None:
+                store.apply_collection_settings(entry.to_dict())
             return entry
 
     def touch(self, name: str) -> None:
@@ -359,6 +430,9 @@ class CollectionsManager:
             store = self._stores.get(normalized)
             if store is None:
                 store = RagStore(normalized)
+                entry = self.get_entry(normalized)
+                if entry is not None:
+                    store.apply_collection_settings(entry.to_dict())
                 self._stores[normalized] = store
             return store
 
@@ -376,8 +450,15 @@ class CollectionsManager:
             for item in name:
                 normalized = self.normalize_name(item)
                 if normalized == "all":
-                    return [self.get_store(entry.name) for entry in self.list_entries()]
+                    return [
+                        self.get_store(entry.name)
+                        for entry in self.list_entries()
+                        if entry.read_allowed
+                    ]
                 if normalized in seen or not self.exists(normalized):
+                    continue
+                entry = self.get_entry(normalized)
+                if entry is None or not entry.read_allowed:
                     continue
                 seen.add(normalized)
                 stores.append(self.get_store(normalized))
@@ -385,8 +466,33 @@ class CollectionsManager:
 
         normalized = self.normalize_name(name)
         if normalized == "all":
-            return [self.get_store(entry.name) for entry in self.list_entries()]
+            return [
+                self.get_store(entry.name)
+                for entry in self.list_entries()
+                if entry.read_allowed
+            ]
+        entry = self.get_entry(normalized)
+        if entry is None or not entry.read_allowed:
+            return []
         return [self.get_store(normalized)]
+
+    def allowed_names(self, name: "str | list[str] | None", write: bool = False) -> list[str]:
+        """Return selected collection names allowed for the requested operation."""
+        allowed_attribute = "write_allowed" if write else "read_allowed"
+        entries = {entry.name: entry for entry in self.list_entries()}
+        if isinstance(name, (list, tuple, set)):
+            requested = [self.normalize_name(item) for item in name]
+        else:
+            normalized = self.normalize_name(name)
+            requested = list(entries) if normalized == "all" else [normalized]
+
+        result: list[str] = []
+        for collection_name in requested:
+            entry = entries.get(collection_name)
+            if entry is not None and getattr(entry, allowed_attribute):
+                if collection_name not in result:
+                    result.append(collection_name)
+        return result
 
     def write_lock(self, name: str) -> threading.RLock:
         normalized = self.normalize_name(name)

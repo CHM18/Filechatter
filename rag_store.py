@@ -105,6 +105,11 @@ class RagStore:
 
     def __init__(self, collection_name: str = "documentation") -> None:
         self.collection_name = collection_name
+        self.read_allowed = True
+        self.write_allowed = False
+        self.semantic_weight = 1.0
+        self.keyword_weight = 2.0
+        self.metadata_weight = 4.0
         self.data_dir = Path(config.DATA_DIR)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.collection_dir = self.data_dir / self.collection_name
@@ -341,6 +346,13 @@ class RagStore:
         self.index = rebuilt
         self._save_index()
         self._rebuild_rowid_cache()
+
+    def apply_collection_settings(self, settings: dict[str, Any]) -> None:
+        self.read_allowed = bool(settings.get("read_allowed", True))
+        self.write_allowed = bool(settings.get("write_allowed", False))
+        self.semantic_weight = max(0.0, min(10.0, float(settings.get("semantic_weight", 1.0))))
+        self.keyword_weight = max(0.0, min(10.0, float(settings.get("keyword_weight", 2.0))))
+        self.metadata_weight = max(0.0, min(10.0, float(settings.get("metadata_weight", 4.0))))
 
     def reload(self) -> None:
         with self._lock:
@@ -619,28 +631,38 @@ class RagStore:
     def search(self, question: str) -> list[SearchResult]:
         with self._lock:
             normalized_question = _normalize_text(question)
+            if not self.read_allowed:
+                return []
             if not normalized_question or self.chunk_count == 0:
                 return []
+            if all(weight <= 0 for weight in (self.semantic_weight, self.keyword_weight, self.metadata_weight)):
+                return []
 
-            semantic_candidates = self._semantic_candidates(normalized_question)
-            keyword_candidates, metadata_candidates = self._keyword_candidates(normalized_question)
+            semantic_candidates: list[int] = []
+            keyword_candidates: list[int] = []
+            metadata_candidates: list[int] = []
+
+            if self.semantic_weight > 0:
+                semantic_candidates = self._semantic_candidates(normalized_question)
+            if self.keyword_weight > 0 or self.metadata_weight > 0:
+                keyword_candidates, metadata_candidates = self._keyword_candidates(normalized_question)
 
             reciprocal_rank_offset = 60
             combined_scores: dict[int, float] = {}
 
             for rank, chunk_id in enumerate(semantic_candidates, start=1):
                 combined_scores[chunk_id] = combined_scores.get(chunk_id, 0.0) + (
-                    config.SEMANTIC_WEIGHT / (reciprocal_rank_offset + rank)
+                    self.semantic_weight / (reciprocal_rank_offset + rank)
                 )
 
             for rank, chunk_id in enumerate(keyword_candidates, start=1):
                 combined_scores[chunk_id] = combined_scores.get(chunk_id, 0.0) + (
-                    config.KEYWORD_WEIGHT / (reciprocal_rank_offset + rank)
+                    self.keyword_weight / (reciprocal_rank_offset + rank)
                 )
 
             for rank, chunk_id in enumerate(metadata_candidates, start=1):
                 combined_scores[chunk_id] = combined_scores.get(chunk_id, 0.0) + (
-                    config.METADATA_KEYWORD_WEIGHT / (reciprocal_rank_offset + rank)
+                    self.metadata_weight / (reciprocal_rank_offset + rank)
                 )
 
             ordered_chunk_ids = [

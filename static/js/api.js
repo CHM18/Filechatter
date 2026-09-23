@@ -55,6 +55,13 @@ const api = {
     return this.request("/collections", { method: "POST", body: JSON.stringify(body) });
   },
 
+  updateCollection(name, body) {
+    return this.request(`/collections/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  },
+
   deleteCollection(name) {
     return this.request(`/collections/${encodeURIComponent(name)}?confirm=true`, { method: "DELETE" });
   },

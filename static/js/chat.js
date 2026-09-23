@@ -1,4 +1,4 @@
-// Chat panel: endpoint config, read/write database selection, streaming
+// Chat panel: endpoint config and streaming conversation
 // conversation with tool cards and confirmation prompts.
 "use strict";
 
@@ -19,6 +19,7 @@ const chatPanel = {
   modelsLoading: null,
   modelsLoadedKey: null,
   modelsLoadedAt: 0,
+  modelsRetryAt: 0,
 
   async init() {
     document.getElementById("chat-form").addEventListener("submit", (e) => {
@@ -51,7 +52,6 @@ const chatPanel = {
         api.listCollections().then((p) => p.collections || []),
       ]);
       this.renderEndpoint();
-      this.renderDbSelectors();
       await this.maybeLoadModels();
     } catch (error) {
       showToast(`Failed to load chat config: ${error.message}`);
@@ -129,6 +129,7 @@ const chatPanel = {
       this.renderModelOptions(this.settings.llm.model);
       return;
     }
+    if (!force && this.modelsRetryAt > Date.now()) return;
     if (this.modelsLoading) return this.modelsLoading;
 
     const status = document.getElementById("chat-endpoint-status");
@@ -147,6 +148,8 @@ const chatPanel = {
         status.textContent = `${models.length} model(s) available`;
         status.classList.add("ok");
       } catch (error) {
+        // Avoid hammering an offline endpoint during background startup refreshes.
+        this.modelsRetryAt = Date.now() + 10000;
         status.textContent = error.message;
         status.classList.add("err");
       } finally {
@@ -156,54 +159,9 @@ const chatPanel = {
     return this.modelsLoading;
   },
 
-  // ---------- Database selectors ----------
-
-  renderDbSelectors() {
-    const defaults = this.settings.chat_defaults || { read_collections: [], write_collections: [] };
-    const names = this.collections.map((c) => c.name);
-    const readSel = defaults.read_collections.filter((n) => names.includes(n));
-    const writeSel = defaults.write_collections.filter((n) => names.includes(n));
-    // Default read = all collections when nothing stored yet.
-    const initialRead = readSel.length || defaults.read_collections.length ? readSel : names;
-
-    this.buildChecklist("chat-read-dbs", "read", initialRead);
-    this.buildChecklist("chat-write-dbs", "write", writeSel);
-  },
-
-  buildChecklist(containerId, kind, selected) {
-    const container = document.getElementById(containerId);
-    if (!this.collections.length) {
-      container.innerHTML = '<div class="hint">No databases yet.</div>';
-      return;
-    }
-    container.innerHTML = this.collections
-      .map((c) => {
-        const checked = selected.includes(c.name) ? "checked" : "";
-        return `<label class="db-item"><input type="checkbox" data-kind="${kind}" value="${escapeHtml(c.name)}" ${checked}> ${escapeHtml(c.name)}</label>`;
-      })
-      .join("");
-    container.querySelectorAll("input").forEach((input) =>
-      input.addEventListener("change", () => this.saveDbDefaults())
-    );
-  },
-
   selectedDbs(kind) {
-    return Array.from(
-      document.querySelectorAll(`#panel-chat input[data-kind="${kind}"]:checked`)
-    ).map((input) => input.value);
-  },
-
-  async saveDbDefaults() {
-    try {
-      await api.updateSettings({
-        chat_defaults: {
-          read_collections: this.selectedDbs("read"),
-          write_collections: this.selectedDbs("write"),
-        },
-      });
-    } catch (_) {
-      /* non-critical */
-    }
+    const allowed = kind === "read" ? "read_allowed" : "write_allowed";
+    return this.collections.filter((collection) => collection[allowed] === true).map((collection) => collection.name);
   },
 
   // ---------- Conversation ----------

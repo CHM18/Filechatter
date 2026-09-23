@@ -197,11 +197,21 @@ class CollectionCreateRequest(BaseModel):
     name: str
     description: str = ""
     allowed_extensions: list[str] = Field(default_factory=list)
+    read_allowed: bool = True
+    write_allowed: bool = False
+    semantic_weight: float = 1.0
+    keyword_weight: float = 2.0
+    metadata_weight: float = 4.0
 
 
 class CollectionUpdateRequest(BaseModel):
     description: str | None = None
     allowed_extensions: list[str] | None = None
+    read_allowed: bool | None = None
+    write_allowed: bool | None = None
+    semantic_weight: float | None = None
+    keyword_weight: float | None = None
+    metadata_weight: float | None = None
 
 
 class ToolCallRequest(BaseModel):
@@ -304,6 +314,11 @@ async def create_collection(request: CollectionCreateRequest):
             name=request.name,
             description=request.description,
             allowed_extensions=request.allowed_extensions,
+            read_allowed=request.read_allowed,
+            write_allowed=request.write_allowed,
+            semantic_weight=request.semantic_weight,
+            keyword_weight=request.keyword_weight,
+            metadata_weight=request.metadata_weight,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -318,6 +333,11 @@ async def update_collection(name: str, request: CollectionUpdateRequest):
             name,
             description=request.description,
             allowed_extensions=request.allowed_extensions,
+            read_allowed=request.read_allowed,
+            write_allowed=request.write_allowed,
+            semantic_weight=request.semantic_weight,
+            keyword_weight=request.keyword_weight,
+            metadata_weight=request.metadata_weight,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown collection: {name}")
@@ -582,15 +602,18 @@ async def chat_stream(request: ChatStreamRequest):
     'session' event carries the id for follow-up requests (message turns and
     confirmation decisions)."""
     store = runtime.chat_sessions()
+    manager = runtime.collections()
+    read_collections = manager.allowed_names(request.read_collections, write=False)
+    write_collections = manager.allowed_names(request.write_collections, write=True)
     session_id = request.session_id
     session = store.get(session_id) if session_id else None
     if session is None:
         session_id = uuid.uuid4().hex
-        session = store.create(session_id, request.read_collections, request.write_collections)
+        session = store.create(session_id, read_collections, write_collections)
 
     # Scope can change between turns (the user may re-pick databases).
-    session["read_cols"] = request.read_collections
-    session["write_cols"] = request.write_collections
+    session["read_cols"] = read_collections
+    session["write_cols"] = write_collections
     if request.message:
         session["messages"].append({"role": "user", "content": request.message})
 

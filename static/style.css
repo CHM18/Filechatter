@@ -89,6 +89,37 @@ main { max-width: 1080px; margin: 0 auto; padding: 1.2rem; }
   align-items: center;
 }
 
+.panel-actions { display: flex; gap: 0.5rem; }
+.panel-actions .btn { min-width: 8.5rem; }
+
+#panel-databases .panel-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 1fr);
+  gap: 0.8rem 1.4rem;
+}
+
+#panel-databases .panel-header h2 {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+#panel-databases .panel-actions {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 1fr);
+  gap: 0.8rem 1.4rem;
+  pointer-events: none;
+}
+
+#panel-databases .panel-actions .btn {
+  pointer-events: auto;
+  justify-self: end;
+}
+
+#panel-databases #btn-apply-all { grid-column: 1; }
+#panel-databases #btn-new-collection { grid-column: 2; }
+
 h2 { font-size: 1.05rem; margin: 1.2rem 0 0.6rem; }
 h3 { margin-top: 0; }
 
@@ -130,12 +161,12 @@ h3 { margin-top: 0; }
   border-radius: var(--radius);
   padding: 0.9rem 1.1rem;
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.4rem 1rem;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 1fr);
+  gap: 0.8rem 1.4rem;
 }
 
 .collection-name { font-weight: 600; font-size: 1.05rem; }
-.collection-desc { color: var(--text-dim); font-size: 0.9rem; grid-column: 1; }
+.collection-desc { color: var(--text-dim); font-size: 0.9rem; }
 
 .collection-meta {
   display: flex;
@@ -143,12 +174,89 @@ h3 { margin-top: 0; }
   gap: 0.4rem 1.4rem;
   font-size: 0.83rem;
   color: var(--text-dim);
-  grid-column: 1;
   margin-top: 0.3rem;
 }
 .collection-meta b { color: var(--text); font-weight: 600; }
 
-.collection-actions { grid-column: 2; grid-row: 1 / span 3; align-self: center; }
+.collection-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.collection-control-header {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.permission-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem 1.2rem;
+}
+
+.collection-control-header > .btn {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.collection-info { min-width: 0; }
+.collection-info-header { display: flex; justify-content: space-between; align-items: start; gap: 0.8rem; }
+.collection-info-header .btn { flex: 0 0 auto; }
+
+.weight-heading { font-size: 0.85rem; font-weight: 600; }
+.weight-heading .hint { margin-left: 0.35rem; }
+
+.switch-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.weight-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  align-items: stretch;
+}
+
+.slider-row {
+  display: grid;
+  grid-template-columns: 72px minmax(100px, 1fr) 2.3rem;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.slider-row input[type="range"] {
+  width: 100%;
+}
+
+@media (max-width: 680px) {
+  .collection-card { grid-template-columns: 1fr; }
+  #panel-databases .panel-header { display: flex; flex-direction: column; }
+  #panel-databases .panel-actions { display: grid; grid-template-columns: 1fr; }
+  #panel-databases #btn-apply-all,
+  #panel-databases #btn-new-collection { grid-column: 1; }
+  .panel-header { align-items: start; gap: 0.8rem; }
+  .panel-actions { flex-wrap: wrap; justify-content: end; }
+}
+
+.dialog-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem 1.2rem;
+}
+
+.dialog-weights {
+  margin-top: 0.6rem;
+  margin-bottom: 0.6rem;
+}
 
 /* ---------- Memory ---------- */
 
@@ -213,6 +321,8 @@ h3 { margin-top: 0; }
 
 .btn-reset { color: var(--text-dim); }
 .btn-reset:hover { color: var(--text); }
+.btn:disabled,
+.btn:disabled:hover { color: var(--text-dim); background: var(--bg); border-color: var(--border); opacity: 0.7; cursor: not-allowed; }
 
 .btn-danger { background: var(--err); border-color: var(--err); color: #fff; }
 .btn-danger:hover { opacity: 0.9; }
@@ -241,6 +351,10 @@ dialog input[type="text"], dialog textarea {
   background: var(--bg);
   color: var(--text);
   font: inherit;
+}
+
+dialog input[type="range"] {
+  accent-color: var(--accent);
 }
 
 dialog fieldset {

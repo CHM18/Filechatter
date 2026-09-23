@@ -32,9 +32,61 @@ class TestCreate:
         assert entry.allowed_extensions == [".pdf", ".txt"]
         assert entry.created_at
         assert entry.last_updated is None
+        assert entry.read_allowed is True
+        assert entry.write_allowed is False
+        assert entry.semantic_weight == 1.0
+        assert entry.keyword_weight == 2.0
+        assert entry.metadata_weight == 4.0
         assert [e.name for e in manager.list_entries()] == ["project-docs"]
         # Store directory materialized immediately.
         assert (manager.data_dir / "project-docs" / "rag.sqlite3").exists()
+
+    def test_selected_stores_filters_read_disabled_collections(self, manager):
+        manager.create("readable")
+        manager.create("blocked", read_allowed=False)
+
+        stores = manager.selected_stores("all")
+        assert [store.collection_name for store in stores] == ["readable"]
+
+    def test_allowed_names_filters_read_and_write_access(self, manager):
+        manager.create("readable", write_allowed=True)
+        manager.create("read-only")
+        manager.create("blocked", read_allowed=False, write_allowed=False)
+
+        assert manager.allowed_names("all") == ["read-only", "readable"]
+        assert manager.allowed_names("all", write=True) == ["readable"]
+        assert manager.allowed_names(["readable", "blocked"], write=True) == ["readable"]
+
+    def test_collection_settings_update_and_persist(self, manager):
+        manager.create("tunable")
+        store = manager.get_store("tunable")
+
+        updated = manager.update_entry(
+            "tunable",
+            read_allowed=False,
+            write_allowed=True,
+            semantic_weight=0.5,
+            keyword_weight=3.5,
+            metadata_weight=6.0,
+        )
+
+        assert updated.read_allowed is False
+        assert updated.write_allowed is True
+        assert store.read_allowed is False
+        assert store.write_allowed is True
+        assert store.semantic_weight == 0.5
+        assert store.keyword_weight == 3.5
+        assert store.metadata_weight == 6.0
+
+        manager.close_all()
+        reloaded = CollectionsManager(manager.data_dir)
+        persisted = reloaded.get_entry("tunable")
+        assert persisted is not None
+        assert persisted.to_dict()["read_allowed"] is False
+        assert persisted.to_dict()["write_allowed"] is True
+        assert persisted.to_dict()["semantic_weight"] == 0.5
+        assert persisted.to_dict()["keyword_weight"] == 3.5
+        assert persisted.to_dict()["metadata_weight"] == 6.0
 
     def test_duplicate_rejected(self, manager):
         manager.create("dup")

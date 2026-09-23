@@ -78,12 +78,25 @@ class TestCollectionsApi:
         client.post("/collections", json={"name": "editable"})
         response = client.patch(
             "/collections/editable",
-            json={"description": "new text", "allowed_extensions": [".txt"]},
+            json={
+                "description": "new text",
+                "allowed_extensions": [".txt"],
+                "read_allowed": False,
+                "write_allowed": True,
+                "semantic_weight": 1.5,
+                "keyword_weight": 3.0,
+                "metadata_weight": 5.0,
+            },
         )
         assert response.status_code == 200
         collection = response.json()["collection"]
         assert collection["description"] == "new text"
         assert collection["allowed_extensions"] == [".txt"]
+        assert collection["read_allowed"] is False
+        assert collection["write_allowed"] is True
+        assert collection["semantic_weight"] == 1.5
+        assert collection["keyword_weight"] == 3.0
+        assert collection["metadata_weight"] == 5.0
 
     def test_delete_requires_confirm(self, client):
         client.post("/collections", json={"name": "cautious"})
