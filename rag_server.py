@@ -198,7 +198,7 @@ class CollectionCreateRequest(BaseModel):
     description: str = ""
     allowed_extensions: list[str] = Field(default_factory=list)
     read_allowed: bool = True
-    write_allowed: bool = False
+    write_allowed: bool = True
     semantic_weight: float = 1.0
     keyword_weight: float = 2.0
     metadata_weight: float = 4.0

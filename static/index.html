@@ -15,7 +15,6 @@
       <button class="tab active" data-panel="chat">Chat</button>
       <button class="tab" data-panel="memory">Memory</button>
       <button class="tab" data-panel="databases">Databases</button>
-      <button class="tab" data-panel="permissions">Permissions</button>
     </nav>
     <div id="server-badge" class="badge badge-unknown">checking…</div>
   </header>
@@ -91,7 +90,7 @@
           <tbody></tbody>
         </table>
       </div>
-      <p class="hint">Endpoint and permission settings become editable here in milestones M3/M4.</p>
+      <p class="hint">Endpoint settings and global tool access are managed in their respective panels.</p>
     </section>
 
     <!-- ============ Databases panel ============ -->
@@ -103,45 +102,20 @@
           <button class="btn btn-primary" id="btn-new-collection">+ New database</button>
         </div>
       </div>
-      <div id="collections-list" class="collections-list"></div>
-    </section>
-
-    <!-- ============ Permissions panel ============ -->
-    <section id="panel-permissions" class="panel">
-      <div class="panel-header">
-        <h2>Tool permissions</h2>
-        <label class="switch">
-          <input type="checkbox" id="advanced-toggle">
-          Advanced configuration
+      <div class="global-access">
+        <h3>Global tool access</h3>
+        <div id="global-perm-container" class="global-perm-grid"></div>
+        <label class="inline-field global-mcp-field">
+          MCP host behavior
+          <select id="global-on-ask-select">
+            <option value="host_confirm">Run it (host shows its own confirmation)</option>
+            <option value="elicit">Try MCP elicitation, else run it</option>
+            <option value="deny">Refuse the call</option>
+          </select>
         </label>
+        <p class="hint">Global tool access controls visibility and availability for all MCP hosts and chat. Database checkboxes control which collections an available tool may access.</p>
       </div>
-      <p class="hint">
-        Controls which tools the model may call. <b>Deny</b> hides the tool from the model entirely.
-        <b>Ask</b> requires confirmation before it runs. These settings apply to the built-in chat
-        (coming in M4) and to MCP hosts such as Claude Desktop and LM Studio. A group button shown
-        <span class="mixed-legend">faded</span> means some of its tools were overridden in advanced
-        mode; click it to reset them.
-      </p>
-
-      <div id="perm-container"></div>
-
-      <div id="advanced-extras" class="hidden">
-        <h2>MCP host behavior</h2>
-        <div class="card wide">
-          <label class="inline-field">
-            When an <b>Ask</b> tool is called from an MCP host (no browser dialog available):
-            <select id="on-ask-select">
-              <option value="host_confirm">Run it (host shows its own confirmation)</option>
-              <option value="elicit">Try MCP elicitation, else run it</option>
-              <option value="deny">Refuse the call</option>
-            </select>
-          </label>
-          <p class="hint">
-            Visibility changes reach MCP hosts only after the host reconnects or restarts; the server
-            still enforces every rule immediately at call time.
-          </p>
-        </div>
-      </div>
+      <div id="collections-list" class="collections-list"></div>
     </section>
   </main>
 
@@ -162,7 +136,7 @@
       </label>
       <div class="dialog-grid">
         <label class="switch-inline"><input type="checkbox" id="create-read-enabled" checked> Read-enabled</label>
-        <label class="switch-inline"><input type="checkbox" id="create-write-enabled"> Write-enabled</label>
+        <label class="switch-inline"><input type="checkbox" id="create-write-enabled" checked> Write-enabled</label>
       </div>
       <div class="weight-editor dialog-weights">
         <label class="slider-row">
@@ -211,11 +185,11 @@
 
   <div id="toast" class="toast"></div>
 
-  <script src="js/api.js?v=20260923"></script>
-  <script src="js/collections.js?v=20260923"></script>
-  <script src="js/permissions.js?v=20260923"></script>
-  <script src="js/chat.js?v=20260923"></script>
-  <script src="js/memory.js?v=20260923"></script>
-  <script src="js/app.js?v=20260923"></script>
+  <script src="js/api.js?v=20260924"></script>
+  <script src="js/collections.js?v=20260924"></script>
+  <script src="js/permissions.js?v=20260924"></script>
+  <script src="js/chat.js?v=20260924"></script>
+  <script src="js/memory.js?v=20260924"></script>
+  <script src="js/app.js?v=20260924"></script>
 </body>
 </html>

@@ -21,6 +21,19 @@ class TestDefaults:
         assert settings["permissions"]["groups"] == {"read": "allow", "write": "ask"}
         assert settings["mcp_hosts"]["on_ask"] == "host_confirm"
 
+    def test_legacy_permission_groups_migrate_to_buckets(self, data_env):
+        path = data_env / "settings.json"
+        data_env.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "permissions": {"groups": {"read": "deny", "write": "allow"}}
+        }), encoding="utf-8")
+
+        settings = SettingsManager(data_env).get()
+        groups = settings["permissions"]["groups"]
+        assert groups["read_tools"] == "deny"
+        assert groups["ingest_tools"] == "allow"
+        assert groups["collection_tools"] == "allow"
+
     def test_get_returns_copy(self, manager):
         settings = manager.get()
         settings["permissions"]["mode"] = "advanced"

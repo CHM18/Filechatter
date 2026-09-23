@@ -50,18 +50,19 @@ def ingest(tmp_path, collection, text, name="doc.txt"):
 
 
 class TestBuildTools:
-    def test_read_tools_drop_collection_name(self, data_env):
+    def test_read_tools_offer_authorized_collection_choices(self, data_env):
         perms = runtime.settings().get()["permissions"]
         tools, plan = chat_agent.build_chat_tools(["docs"], [], perms)
         search = next(t for t in tools if t["function"]["name"] == "search_documents")
-        assert "collection_name" not in search["function"]["parameters"]["properties"]
+        assert search["function"]["parameters"]["properties"]["collection_name"]["enum"] == ["docs"]
         assert plan["search_documents"] == "read"
 
     def test_write_tools_hidden_without_write_db(self, data_env):
         perms = runtime.settings().get()["permissions"]
         names = {t["function"]["name"] for t in chat_agent.build_chat_tools(["docs"], [], perms)[0]}
         assert "ingest_file" not in names
-        assert "clear_index" not in names
+        assert "clear_index" in names
+        assert "create_collection" in names
         assert "search_documents" in names
 
     def test_single_write_db_autofills(self, data_env):

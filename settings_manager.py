@@ -2,10 +2,10 @@
 
 .env / config.py stay authoritative for static infrastructure settings
 (ports, chunking, embedding model). settings.json holds everything the web
-UI can change at runtime: LLM endpoint, permissions, chat defaults.
+UI can change at runtime: LLM endpoint, global tool permissions, and MCP host behavior.
 
-The permissions structure is stored from M1 on so that the file format is
-stable; enforcement arrives with milestone M3.
+The permissions structure is kept backward-compatible with the original
+read/write group names while new UI changes use three global tool buckets.
 """
 from __future__ import annotations
 
@@ -44,10 +44,6 @@ def default_settings() -> dict[str, Any]:
             "groups": {"read": "allow", "write": "ask"},
             "tools": {},
         },
-        "chat_defaults": {
-            "read_collections": [],
-            "write_collections": [],
-        },
         "mcp_hosts": {
             "on_ask": "host_confirm",
         },
@@ -70,7 +66,7 @@ def _validate(settings: dict[str, Any]) -> None:
     if mode not in VALID_PERMISSION_MODES:
         raise ValueError(f"permissions.mode must be one of {sorted(VALID_PERMISSION_MODES)}")
     for group, value in permissions.get("groups", {}).items():
-        if group not in {"read", "write"}:
+        if group not in {"read", "write", "read_tools", "ingest_tools", "collection_tools"}:
             raise ValueError(f"Unknown permission group: {group}")
         if value not in VALID_PERMISSION_VALUES:
             raise ValueError(f"permissions.groups.{group} must be one of {sorted(VALID_PERMISSION_VALUES)}")
@@ -104,6 +100,14 @@ class SettingsManager:
             return
         # Merge on top of defaults so new fields appear automatically after upgrades.
         self._settings = _deep_merge(default_settings(), stored)
+        old_groups = stored.get("permissions", {}).get("groups", {})
+        groups = self._settings["permissions"]["groups"]
+        if "read" in old_groups and "read_tools" not in old_groups:
+            groups["read_tools"] = old_groups["read"]
+        if "write" in old_groups and "ingest_tools" not in old_groups:
+            groups["ingest_tools"] = old_groups["write"]
+        if "write" in old_groups and "collection_tools" not in old_groups:
+            groups["collection_tools"] = old_groups["write"]
 
     def _save(self) -> None:
         with self._lock:
@@ -130,15 +134,23 @@ class SettingsManager:
     def set_permissions(self, permissions: dict[str, Any]) -> dict[str, Any]:
         """Replace the whole permissions block (not a merge).
 
-        The UI sends its complete desired state, so this can also *remove*
-        per-tool overrides - which a deep merge cannot do. Missing sub-keys
-        fall back to defaults so a partial payload stays valid.
+        Missing sub-keys fall back to defaults so a partial payload stays valid.
+        Legacy per-tool overrides are retained for compatibility but are no
+        longer exposed by the web UI.
         """
         with self._lock:
             defaults = default_settings()["permissions"]
+            supplied_groups = permissions.get("groups") or {}
+            groups = {**defaults["groups"], **supplied_groups}
+            if "read" in supplied_groups and "read_tools" not in supplied_groups:
+                groups["read_tools"] = supplied_groups["read"]
+            if "write" in supplied_groups and "ingest_tools" not in supplied_groups:
+                groups["ingest_tools"] = supplied_groups["write"]
+            if "write" in supplied_groups and "collection_tools" not in supplied_groups:
+                groups["collection_tools"] = supplied_groups["write"]
             new_permissions = {
                 "mode": permissions.get("mode", defaults["mode"]),
-                "groups": {**defaults["groups"], **(permissions.get("groups") or {})},
+                "groups": groups,
                 "tools": dict(permissions.get("tools") or {}),
             }
             candidate = copy.deepcopy(self._settings)

@@ -33,7 +33,7 @@ class TestCreate:
         assert entry.created_at
         assert entry.last_updated is None
         assert entry.read_allowed is True
-        assert entry.write_allowed is False
+        assert entry.write_allowed is True
         assert entry.semantic_weight == 1.0
         assert entry.keyword_weight == 2.0
         assert entry.metadata_weight == 4.0
@@ -54,7 +54,7 @@ class TestCreate:
         manager.create("blocked", read_allowed=False, write_allowed=False)
 
         assert manager.allowed_names("all") == ["read-only", "readable"]
-        assert manager.allowed_names("all", write=True) == ["readable"]
+        assert manager.allowed_names("all", write=True) == ["read-only", "readable"]
         assert manager.allowed_names(["readable", "blocked"], write=True) == ["readable"]
 
     def test_collection_settings_update_and_persist(self, manager):

@@ -27,8 +27,52 @@ ALLOW = "allow"
 ASK = "ask"
 DENY = "deny"
 
+READ_TOOLS = "read_tools"
+INGEST_TOOLS = "ingest_tools"
+COLLECTION_TOOLS = "collection_tools"
+
+TOOL_GROUPS = {
+    "search_documents": READ_TOOLS,
+    "list_sources": READ_TOOLS,
+    "get_document_support": READ_TOOLS,
+    "ingest_file": INGEST_TOOLS,
+    "start_ingest_directory": INGEST_TOOLS,
+    "get_ingest_status": INGEST_TOOLS,
+    "get_ingest_log": INGEST_TOOLS,
+    "create_collection": COLLECTION_TOOLS,
+    "delete_collection": COLLECTION_TOOLS,
+    "clear_index": COLLECTION_TOOLS,
+}
+
+BUCKET_LABELS = {
+    READ_TOOLS: "Read tools",
+    INGEST_TOOLS: "Ingest tools",
+    COLLECTION_TOOLS: "Collection administration",
+}
+
 # Fallback group defaults if settings somehow omit a group.
-_DEFAULT_GROUP = {tool_registry.READ: ALLOW, tool_registry.WRITE: ASK}
+_DEFAULT_GROUP = {
+    READ_TOOLS: ALLOW,
+    INGEST_TOOLS: ASK,
+    COLLECTION_TOOLS: ASK,
+}
+
+
+def tool_group(tool_name: str) -> str:
+    """Return the global permission bucket for a registered tool."""
+    return TOOL_GROUPS.get(tool_name, INGEST_TOOLS)
+
+
+def _group_value(perms: dict, group: str) -> str:
+    groups = perms.get("groups", {})
+    if group in groups:
+        return groups[group]
+    # Migrate the old two-bucket settings shape without rewriting the file.
+    if group == READ_TOOLS and "read" in groups:
+        return groups["read"]
+    if group in {INGEST_TOOLS, COLLECTION_TOOLS} and "write" in groups:
+        return groups["write"]
+    return _DEFAULT_GROUP[group]
 
 # Caller contexts.
 CLIENT_API = "api"   # direct REST / web chat (M4 handles ask itself)
@@ -52,8 +96,7 @@ def resolve(tool_name: str, permissions: dict | None = None) -> str:
         override = perms.get("tools", {}).get(tool_name)
         if override in (ALLOW, ASK, DENY):
             return override
-    groups = perms.get("groups", {})
-    return groups.get(spec.access, _DEFAULT_GROUP[spec.access])
+    return _group_value(perms, tool_group(tool_name))
 
 
 def is_visible(tool_name: str, permissions: dict | None = None) -> bool:
@@ -82,8 +125,9 @@ def describe(tool_name: str, permissions: dict | None = None) -> dict:
     return {
         "name": tool_name,
         "access": spec.access,
+        "permission_group": tool_group(tool_name),
         "permission": resolve(tool_name, perms),
-        "group_default": perms.get("groups", {}).get(spec.access, _DEFAULT_GROUP[spec.access]),
+        "group_default": _group_value(perms, tool_group(tool_name)),
         "has_override": override is not None,
     }
 

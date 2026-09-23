@@ -52,7 +52,7 @@ Indexed data is persisted under `./data/<collection_name>/` by default. Collecti
 - **Chat** - talk to a local model with your documents as grounding; database read/write access comes from the Database settings, with tool calls and write approvals shown inline
 - **Status** - server health, LM Studio connectivity, collection/document/chunk totals, active configuration
 - **Databases** - list all RAG databases with live document/chunk counts, create new databases, configure read/write access and semantic/keyword/metadata retrieval weights, apply settings per database or in bulk, and delete databases
-- **Permissions** - Ask/Allow/Deny control over the tools the model may call
+- **Global tool access** - Ask/Allow/Deny controls for read, ingest, and collection administration tools, plus MCP host behavior
 
 ### Chat
 
@@ -65,40 +65,32 @@ Configure the endpoint in the Chat sidebar (provider, base URL, model) and press
 **Reload models** (⟳). Then:
 
 - **Read from / Write to** - database access is controlled centrally in the Databases tab. The
-  backend filters every chat request against those access flags, so the model and browser cannot
-  widen the scope by submitting different collection names.
+  model selects from the authorized collection choices exposed by each tool, and the backend
+  filters every request against those access flags.
 - **Grounding** - the model calls `search_documents` against your read databases and cites
   what it used.
-- **Writes** - respect the Permissions settings. With *Ask* (the default for writes), each
-  ingest/clear pauses for your approval in the chat. When several write databases are
-  selected, the model picks the best match by description/file-type; if it can't, you're
-  asked to choose - all in one confirmation.
+- **Writes** - respect the global Ingest and Collection administration settings. With *Ask*,
+  each ingest/clear operation pauses for approval in the chat.
 - **Sessions** - each browser tab is its own conversation; "New conversation" starts fresh.
 
-### Tool permissions
+### Global tool access
 
-The **Permissions** panel controls which tools the model may call. Read-only tools
-(`search_documents`, `list_sources`, `get_document_support`, `get_ingest_status`,
-`get_ingest_log`) and write tools (`ingest_file`, `start_ingest_directory`,
-`clear_index`) each have a group setting:
+The Databases tab controls which tools the model and MCP hosts may call in three global buckets:
+
+- **Read tools** - `search_documents`, `list_sources`, and `get_document_support`
+- **Ingest tools** - `ingest_file`, `start_ingest_directory`, `get_ingest_status`, and `get_ingest_log`
+- **Collection administration** - `create_collection`, `clear_index`, and `delete_collection`
 
 - **Allow** - the tool runs without confirmation
 - **Ask** - confirmation is required before it runs
 - **Deny** - the tool is hidden from the model entirely and rejected if called anyway
 
-Turn on **Advanced configuration** to override the decision per individual tool. The tools
-are shown in two buckets (Read / Write), each headed by its group buttons; a tool without an
-explicit override follows its group default (so a tool added in a future version is governed
-by your group setting rather than silently allowed).
-
-Clicking a **group button** applies that value to the whole group and clears any per-tool
-overrides in it — exactly like simple mode. When a group contains diverging overrides, its
-selected button is shown **faded** (a "mixed" state), including after you switch back to
-simple mode, so stashed overrides stay visible. Clicking the group button again resets it to
-a clean, uniform state.
+The MCP host behavior setting determines how *Ask* is handled by hosts that cannot show the
+browser confirmation dialog. Collection-level read/write checkboxes remain independent and
+show as greyed when their corresponding global bucket is denied.
 
 These settings live in `data/settings.json` and apply to **both** the built-in chat
-(arriving in M4) and MCP hosts. Enforcement is central and immediate: even if a host
+and MCP hosts. Enforcement is central and immediate: even if a host
 still advertises a now-denied tool, the server rejects the call.
 
 **Ask behavior differs by caller**, because only the browser can show Filechatter's own
@@ -109,7 +101,7 @@ confirmation dialog:
 | Built-in web chat (M4) | runs | browser asks the user | hidden + rejected |
 | MCP host (Claude Desktop, LM Studio) | runs | see `mcp_hosts.on_ask` below | hidden + rejected |
 
-`mcp_hosts.on_ask` (Advanced → *MCP host behavior*) decides what an **Ask** tool does when
+`mcp_hosts.on_ask` (*MCP host behavior* in the Databases tab) decides what an **Ask** tool does when
 invoked from an MCP host:
 
 - `host_confirm` (default) - run it; the host shows its own tool-use confirmation
@@ -323,7 +315,7 @@ python -m cli clear --yes
 - `GET /tools` - List tools with read/write classification, parameter schemas, and resolved permission; `?visible=true` excludes denied tools
 - `POST /tools/{name}` - Execute a tool, enforcing permissions (body: `{"arguments": {...}, "client": "api"|"mcp"}`); returns 403 when denied
 - `GET /settings` / `PUT /settings` - Runtime settings (`data/settings.json`; secrets masked in responses)
-- `PUT /settings/permissions` - Replace the permissions block (clears per-tool overrides)
+- `PUT /settings/permissions` - Replace the global tool-access bucket settings
 - `GET /llm/models` / `POST /llm/test` - List models / test the configured chat endpoint
 - `POST /chat/stream` - Built-in chat agent loop, streamed as Server-Sent Events
 - `POST /search` - Retrieve relevant chunks only; accepts `collection_name`
@@ -392,7 +384,7 @@ Claude Desktop stdio─┼─► rag_mcp_server.py (thin proxy, per host)
                      │        │ HTTP /tools/<name>
 Browser (web UI) ────┼────────▼
 CLI ─────────────────┴─► rag_server.py (localhost:8000)   ◄─ single writer
-                          ├─ tool_registry.py  (read/write classified tools)
+                          ├─ tool_registry.py  (bucket-classified tools)
                           ├─ collections_manager.py (collections.json + stores)
                           ├─ ingest_jobs.py    (queued background ingest)
                           ├─ settings_manager.py (data/settings.json)

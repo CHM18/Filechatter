@@ -109,7 +109,7 @@ class CollectionEntry:
     created_at: str = field(default_factory=utc_now_iso)
     last_updated: str | None = None
     read_allowed: bool = True
-    write_allowed: bool = False
+    write_allowed: bool = True
     semantic_weight: float = 1.0
     keyword_weight: float = 2.0
     metadata_weight: float = 4.0
@@ -163,7 +163,7 @@ class CollectionEntry:
             created_at=str(data.get("created_at") or utc_now_iso()),
             last_updated=data.get("last_updated"),
             read_allowed=cls._coerce_bool(data.get("read_allowed"), True),
-            write_allowed=cls._coerce_bool(data.get("write_allowed"), False),
+            write_allowed=cls._coerce_bool(data.get("write_allowed"), True),
             semantic_weight=cls._coerce_weight(data.get("semantic_weight"), 1.0),
             keyword_weight=cls._coerce_weight(data.get("keyword_weight"), 2.0),
             metadata_weight=cls._coerce_weight(data.get("metadata_weight"), 4.0),
@@ -295,7 +295,7 @@ class CollectionsManager:
         description: str = "",
         allowed_extensions: list[str] | None = None,
         read_allowed: bool = True,
-        write_allowed: bool = False,
+        write_allowed: bool = True,
         semantic_weight: float = 1.0,
         keyword_weight: float = 2.0,
         metadata_weight: float = 4.0,
@@ -310,7 +310,7 @@ class CollectionsManager:
                 description=description.strip(),
                 allowed_extensions=normalize_extensions(allowed_extensions),
                 read_allowed=CollectionEntry._coerce_bool(read_allowed, True),
-                write_allowed=CollectionEntry._coerce_bool(write_allowed, False),
+                write_allowed=CollectionEntry._coerce_bool(write_allowed, True),
                 semantic_weight=CollectionEntry._coerce_weight(semantic_weight, 1.0),
                 keyword_weight=CollectionEntry._coerce_weight(keyword_weight, 2.0),
                 metadata_weight=CollectionEntry._coerce_weight(metadata_weight, 4.0),

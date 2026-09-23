@@ -74,9 +74,19 @@ def build_chat_tools(
         schema = json.loads(json.dumps(spec.params_schema))  # deep copy
         props = schema.get("properties", {})
 
-        if spec.access == tool_registry.READ:
-            props.pop("collection_name", None)
-        else:  # write
+        group = permissions.tool_group(spec.name)
+        if group == permissions.READ_TOOLS:
+            if spec.name in READ_SCOPED_TOOLS:
+                if not read_cols:
+                    continue
+                props["collection_name"] = {
+                    "type": "string",
+                    "enum": list(read_cols),
+                    "description": "Readable database to search.",
+                }
+            else:
+                props.pop("collection_name", None)
+        elif group == permissions.INGEST_TOOLS:
             if not write_cols:
                 continue  # no write target -> hide write tools entirely
             if "collection_name" in props:
@@ -88,6 +98,8 @@ def build_chat_tools(
                         "enum": list(write_cols),
                         "description": "Target database for this write operation.",
                     }
+                # Collection administration is global and is not tied to a database
+                # read/write checkbox. Its own tool arguments select the target.
 
         schema["properties"] = props
         schema["required"] = [name for name in schema.get("required", []) if name in props]
@@ -277,7 +289,8 @@ def run(
 
                     write_collection = None
                     needs_choice = False
-                    if access == tool_registry.WRITE:
+                    group = permissions.tool_group(name)
+                    if group == permissions.INGEST_TOOLS:
                         write_collection, needs_choice = _resolve_write_collection(
                             raw_args, write_cols, decision
                         )
@@ -294,10 +307,9 @@ def run(
                         continue
 
                     scoped_args = dict(raw_args)
-                    if access == tool_registry.READ:
-                        if name in READ_SCOPED_TOOLS:
-                            scoped_args["collection_name"] = list(read_cols)
-                    elif write_collection is not None:
+                    if group == permissions.READ_TOOLS and name in READ_SCOPED_TOOLS and "collection_name" not in scoped_args:
+                        scoped_args["collection_name"] = list(read_cols)
+                    if group == permissions.INGEST_TOOLS and write_collection is not None:
                         scoped_args["collection_name"] = write_collection
 
                     yield {"type": "tool_call", "id": call["id"], "name": name, "arguments": scoped_args}

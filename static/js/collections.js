@@ -40,6 +40,8 @@ const collectionsPanel = {
     }
 
     await this.refresh();
+    await permissionsPanel.refresh();
+    await this.refresh();
   },
 
   async refresh() {
@@ -85,6 +87,7 @@ const collectionsPanel = {
       });
     });
     container.querySelectorAll(".collection-card").forEach((card) => this.updateDirtyState(card));
+    container.querySelectorAll(".collection-card").forEach((card) => this.updateSliderState(card));
     this.updateApplyAllState();
   },
 
@@ -93,14 +96,18 @@ const collectionsPanel = {
       ? collection.allowed_extensions.map((ext) => `<span class="ext-tag">${escapeHtml(ext)}</span>`).join("")
       : '<span class="hint">all supported types</span>';
     const maybeRead = collection.read_allowed !== false;
-    const maybeWrite = collection.write_allowed === true;
+    const maybeWrite = collection.write_allowed !== false;
+    const readReachable = !permissionsPanel.settings || permissionsPanel.groupValue("read_tools") !== "deny";
+    const writeReachable = !permissionsPanel.settings || permissionsPanel.groupValue("ingest_tools") !== "deny";
+    const readState = readReachable ? "" : "disabled title=\"Read tools are denied globally\"";
+    const writeState = writeReachable ? "" : "disabled title=\"Ingest tools are denied globally\"";
     const card = `
       <div class="collection-card" data-name="${escapeHtml(collection.name)}">
         <div class="collection-controls">
           <div class="collection-control-header">
             <div class="permission-toggles">
-              <label class="switch-inline"><input type="checkbox" data-role="read" data-name="${escapeHtml(collection.name)}" ${maybeRead ? "checked" : ""}> Read-enabled</label>
-              <label class="switch-inline"><input type="checkbox" data-role="write" data-name="${escapeHtml(collection.name)}" ${maybeWrite ? "checked" : ""}> Write-enabled</label>
+              <label class="switch-inline ${readReachable ? "" : "permission-unreachable"}"><input type="checkbox" data-role="read" data-name="${escapeHtml(collection.name)}" ${maybeRead ? "checked" : ""} ${readState}> Read-enabled</label>
+              <label class="switch-inline ${writeReachable ? "" : "permission-unreachable"}"><input type="checkbox" data-role="write" data-name="${escapeHtml(collection.name)}" ${maybeWrite ? "checked" : ""} ${writeState}> Write-enabled</label>
             </div>
             <button class="btn btn-primary" data-save="${escapeHtml(collection.name)}">Apply</button>
           </div>
@@ -108,17 +115,17 @@ const collectionsPanel = {
           <div class="weight-editor">
             <label class="slider-row">
               <span>Semantic</span>
-              <input type="range" min="0" max="10" step="0.1" value="${Number(collection.semantic_weight ?? 1).toFixed(1)}" data-weight="semantic" data-name="${escapeHtml(collection.name)}">
+              <input type="range" min="0" max="10" step="0.1" value="${Number(collection.semantic_weight ?? 1).toFixed(1)}" data-weight="semantic" data-name="${escapeHtml(collection.name)}" ${maybeRead && readReachable ? "" : "disabled"}>
               <b data-weight-value="semantic:${escapeHtml(collection.name)}">${Number(collection.semantic_weight ?? 1).toFixed(1)}</b>
             </label>
             <label class="slider-row">
               <span>Keyword</span>
-              <input type="range" min="0" max="10" step="0.1" value="${Number(collection.keyword_weight ?? 2).toFixed(1)}" data-weight="keyword" data-name="${escapeHtml(collection.name)}">
+              <input type="range" min="0" max="10" step="0.1" value="${Number(collection.keyword_weight ?? 2).toFixed(1)}" data-weight="keyword" data-name="${escapeHtml(collection.name)}" ${maybeRead && readReachable ? "" : "disabled"}>
               <b data-weight-value="keyword:${escapeHtml(collection.name)}">${Number(collection.keyword_weight ?? 2).toFixed(1)}</b>
             </label>
             <label class="slider-row">
               <span>Metadata</span>
-              <input type="range" min="0" max="10" step="0.1" value="${Number(collection.metadata_weight ?? 4).toFixed(1)}" data-weight="metadata" data-name="${escapeHtml(collection.name)}">
+              <input type="range" min="0" max="10" step="0.1" value="${Number(collection.metadata_weight ?? 4).toFixed(1)}" data-weight="metadata" data-name="${escapeHtml(collection.name)}" ${maybeRead && readReachable ? "" : "disabled"}>
               <b data-weight-value="metadata:${escapeHtml(collection.name)}">${Number(collection.metadata_weight ?? 4).toFixed(1)}</b>
             </label>
           </div>
@@ -155,22 +162,30 @@ const collectionsPanel = {
     const card = input.closest(".collection-card");
     if (!card) return;
     if (input.dataset.role === "read" && !input.checked) {
-      card.querySelectorAll('[data-weight]').forEach((slider) => {
-        slider.value = "0";
-        const value = card.querySelector(`[data-weight-value="${slider.dataset.weight}:${slider.dataset.name}"]`);
-        if (value) value.textContent = "0.0";
-      });
+      this.updateSliderState(card);
     } else if (input.dataset.role === "read" && input.checked && this.allWeightsZero(card)) {
       const semantic = card.querySelector('[data-weight="semantic"]');
       semantic.value = "1.0";
       const value = card.querySelector(`[data-weight-value="semantic:${semantic.dataset.name}"]`);
       if (value) value.textContent = "1.0";
+      this.updateSliderState(card);
     } else if (input.dataset.weight && this.allWeightsZero(card)) {
       card.querySelector('[data-role="read"]').checked = false;
     } else if (input.dataset.weight) {
       card.querySelector('[data-role="read"]').checked = true;
     }
+    this.updateSliderState(card);
     this.updateDirtyState(card);
+  },
+
+  updateSliderState(card) {
+    const read = card.querySelector('[data-role="read"]');
+    const reachable = !permissionsPanel.settings || permissionsPanel.groupValue("read_tools") !== "deny";
+    const enabled = read.checked && reachable;
+    card.querySelectorAll('[data-weight]').forEach((slider) => {
+      slider.disabled = !enabled;
+      slider.closest(".slider-row")?.classList.toggle("permission-unreachable", !enabled);
+    });
   },
 
   allWeightsZero(card) {
@@ -206,9 +221,12 @@ const collectionsPanel = {
   },
 
   collectionPayload(card) {
+    const stored = card._storedSettings;
+    const read = card.querySelector('[data-role="read"]');
+    const write = card.querySelector('[data-role="write"]');
     return {
-      read_allowed: card.querySelector('[data-role="read"]').checked,
-      write_allowed: card.querySelector('[data-role="write"]').checked,
+      read_allowed: read.disabled ? stored.read_allowed : read.checked,
+      write_allowed: write.disabled ? stored.write_allowed : write.checked,
       semantic_weight: Number(card.querySelector('[data-weight="semantic"]').value),
       keyword_weight: Number(card.querySelector('[data-weight="keyword"]').value),
       metadata_weight: Number(card.querySelector('[data-weight="metadata"]').value),
@@ -259,7 +277,7 @@ const collectionsPanel = {
     document.getElementById("create-name").value = "";
     document.getElementById("create-description").value = "";
     document.getElementById("create-read-enabled").checked = true;
-    document.getElementById("create-write-enabled").checked = false;
+    document.getElementById("create-write-enabled").checked = true;
     document.getElementById("create-semantic-weight").value = "1.0";
     document.getElementById("create-keyword-weight").value = "2.0";
     document.getElementById("create-metadata-weight").value = "4.0";

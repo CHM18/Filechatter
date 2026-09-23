@@ -120,7 +120,7 @@ class TestToolsApi:
     def test_list_tools(self, client):
         payload = client.get("/tools").json()
         tools = {tool["name"]: tool for tool in payload["tools"]}
-        assert len(tools) == 8
+        assert len(tools) == 10
         assert tools["search_documents"]["access"] == "read"
         assert tools["clear_index"]["access"] == "write"
         assert tools["ingest_file"]["params_schema"]["required"] == ["path"]

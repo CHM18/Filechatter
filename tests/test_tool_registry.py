@@ -31,10 +31,15 @@ class TestRegistry:
             "ingest_file",
             "start_ingest_directory",
             "clear_index",
+            "create_collection",
+            "delete_collection",
         }
         read_tools = {name for name, spec in specs.items() if spec.access == "read"}
         write_tools = {name for name, spec in specs.items() if spec.access == "write"}
-        assert write_tools == {"ingest_file", "start_ingest_directory", "clear_index"}
+        assert write_tools == {
+            "ingest_file", "start_ingest_directory", "clear_index",
+            "create_collection", "delete_collection",
+        }
         assert read_tools == set(specs) - write_tools
 
     def test_every_tool_has_params_schema(self):

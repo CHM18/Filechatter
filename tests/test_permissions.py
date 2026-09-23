@@ -12,6 +12,20 @@ def set_permissions(**changes):
 
 
 class TestResolveSimpleMode:
+    def test_tools_resolve_from_three_global_buckets(self, data_env):
+        set_permissions(groups={
+            "read_tools": "deny",
+            "ingest_tools": "allow",
+            "collection_tools": "ask",
+        })
+
+        assert permissions.tool_group("search_documents") == permissions.READ_TOOLS
+        assert permissions.resolve("search_documents") == "deny"
+        assert permissions.tool_group("ingest_file") == permissions.INGEST_TOOLS
+        assert permissions.resolve("ingest_file") == "allow"
+        assert permissions.tool_group("clear_index") == permissions.COLLECTION_TOOLS
+        assert permissions.resolve("clear_index") == "ask"
+
     def test_defaults_read_allow_write_ask(self, data_env):
         assert permissions.resolve("search_documents") == "allow"   # read
         assert permissions.resolve("list_sources") == "allow"       # read
@@ -54,7 +68,7 @@ class TestVisibility:
 
     def test_all_visible_by_default(self, data_env):
         names = permissions.visible_tool_names()
-        assert len(names) == 8
+        assert len(names) == 10
         assert {"search_documents", "list_sources", "ingest_file", "start_ingest_directory", "clear_index"}.issubset(names)
 
     def test_unknown_tool_raises(self, data_env):

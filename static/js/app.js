@@ -15,6 +15,7 @@ const app = {
       memoryPanel.init(),
       chatRefresh,
     ]);
+    await permissionsPanel.refresh();
 
     // Keep the status badge fresh.
     setInterval(() => this.refreshStatus(), 30000);
@@ -42,7 +43,6 @@ const app = {
     if (name === "chat") chatPanel.refresh();
     if (name === "memory") memoryPanel.refresh();
     if (name === "databases") collectionsPanel.refresh();
-    if (name === "permissions") permissionsPanel.refresh();
   },
 
   async refreshStatus() {
@@ -71,9 +71,9 @@ const app = {
         ["LLM endpoint", settings.llm.base_url],
         ["Model", settings.llm.model],
         ["Temperature", settings.llm.temperature],
-        ["Permissions mode", settings.permissions.mode],
-        ["Read operations", settings.permissions.groups.read],
-        ["Write operations", settings.permissions.groups.write],
+        ["Read tools", settings.permissions.groups.read_tools || settings.permissions.groups.read],
+        ["Ingest tools", settings.permissions.groups.ingest_tools || settings.permissions.groups.write],
+        ["Collection administration", settings.permissions.groups.collection_tools || settings.permissions.groups.write],
       ];
       document.querySelector("#settings-table tbody").innerHTML = rows
         .map(([key, value]) => `<tr><td>${escapeHtml(key)}</td><td>${escapeHtml(value)}</td></tr>`)

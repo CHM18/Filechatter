@@ -125,6 +125,22 @@ h3 { margin-top: 0; }
 
 .hint { color: var(--text-dim); font-size: 0.85rem; font-weight: normal; }
 
+.global-access {
+  margin: 0.9rem 0 1rem;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.global-access h3 { margin: 0 0 0.7rem; font-size: 0.95rem; }
+.global-perm-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+.global-perm-cell { min-width: 0; }
+.global-perm-title { display: flex; flex-direction: column; gap: 0.15rem; font-weight: 600; font-size: 0.9rem; margin-bottom: 0.35rem; }
+.global-mcp-field { display: flex; align-items: center; gap: 0.8rem; margin-top: 0.9rem; }
+.global-mcp-field select { max-width: 360px; }
+.permission-unreachable { opacity: 0.48; }
+
 /* ---------- Cards ---------- */
 
 .cards {
@@ -237,7 +253,13 @@ h3 { margin-top: 0; }
   width: 100%;
 }
 
+.slider-row.permission-unreachable {
+  opacity: 0.48;
+}
+
 @media (max-width: 680px) {
+  .global-perm-grid { grid-template-columns: 1fr; }
+  .global-mcp-field { align-items: start; flex-direction: column; gap: 0.3rem; }
   .collection-card { grid-template-columns: 1fr; }
   #panel-databases .panel-header { display: flex; flex-direction: column; }
   #panel-databases .panel-actions { display: grid; grid-template-columns: 1fr; }
@@ -417,7 +439,7 @@ dialog fieldset legend { display: flex; justify-content: space-between; align-it
 .perm-label { font-weight: 600; }
 .perm-label.mono { font-family: Consolas, monospace; font-weight: 500; }
 
-/* Bucket = a group header row followed by its per-tool rows. */
+/* Permission bucket controls share the same segmented-control styling. */
 .perm-bucket { margin-bottom: 0.9rem; }
 .perm-bucket-head {
   display: flex;

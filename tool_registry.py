@@ -285,6 +285,8 @@ def ingest_file(path: str, collection_name: str = "all") -> dict[str, Any]:
         target_collection = str(loaded_document.metadata.get("collection_name", "documentation")).lower()
     else:
         entry = manager.ensure(normalized)
+        if not entry.write_allowed:
+            raise ValueError(f"Collection '{entry.name}' is not write-enabled")
         if not entry.allows_extension(file_path.suffix):
             allowed = ", ".join(entry.allowed_extensions)
             raise ValueError(
@@ -296,6 +298,9 @@ def ingest_file(path: str, collection_name: str = "all") -> dict[str, Any]:
         loaded_document.metadata["content_type"] = target_collection
 
     store = manager.get_store(target_collection)
+    target_entry = manager.get_entry(target_collection)
+    if target_entry is not None and not target_entry.write_allowed:
+        raise ValueError(f"Collection '{target_collection}' is not write-enabled")
     if not loaded_document.content.strip():
         return {
             "documents_uploaded": 0,
@@ -318,7 +323,9 @@ def start_ingest_directory(path: str, recursive: bool = True, collection_name: s
 
     normalized = manager.normalize_name(collection_name)
     if normalized != "all":
-        manager.ensure(normalized)
+        entry = manager.ensure(normalized)
+        if not entry.write_allowed:
+            raise ValueError(f"Collection '{entry.name}' is not write-enabled")
 
     return runtime.jobs().start_job(
         path=str(dir_path),
@@ -333,7 +340,7 @@ def clear_index(confirm: bool = False, collection_name: str = "all", source: str
     source_value = source.strip()
 
     if not confirm:
-        stores = manager.selected_stores(normalized)
+        stores = [manager.get_store(entry.name) for entry in manager.list_entries()] if normalized == "all" else [manager.get_store(normalized)]
         total_chunks = sum(store.chunk_count for store in stores)
         target_chunks = total_chunks
         if source_value:
@@ -355,7 +362,7 @@ def clear_index(confirm: bool = False, collection_name: str = "all", source: str
             "total_chunks": total_chunks,
         }
 
-    stores = manager.selected_stores(normalized)
+    stores = [manager.get_store(entry.name) for entry in manager.list_entries()] if normalized == "all" else [manager.get_store(normalized)]
     deleted_chunks = 0
     cleared_sources: list[dict[str, Any]] = []
 
@@ -405,6 +412,27 @@ def clear_index(confirm: bool = False, collection_name: str = "all", source: str
     }
 
 
+def create_collection(
+    name: str,
+    description: str = "",
+    allowed_extensions: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create an empty collection through the global administration tool."""
+    entry = runtime.collections().create(name, description, allowed_extensions)
+    return runtime.collections().describe(entry.name)
+
+
+def delete_collection(name: str, confirm: bool = False) -> dict[str, Any]:
+    """Delete a collection and its indexed data through the global administration tool."""
+    if not confirm:
+        return {
+            "status": "cancelled",
+            "message": "Pass confirm=true to delete this collection and all its data.",
+            "collection": runtime.collections().describe(name),
+        }
+    return runtime.collections().delete(name)
+
+
 # ----------------------------------------------------------------------
 # Registry definitions
 # ----------------------------------------------------------------------
@@ -428,6 +456,41 @@ _register(
                 "collection_name": _COLLECTION_PARAM,
             },
             "required": ["query"],
+        },
+    )
+)
+
+_register(
+    ToolSpec(
+        name="create_collection",
+        description="Create an empty RAG database.",
+        access=WRITE,
+        handler=create_collection,
+        params_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "New database name."},
+                "description": {"type": "string", "default": ""},
+                "allowed_extensions": {"type": "array", "items": {"type": "string"}, "default": []},
+            },
+            "required": ["name"],
+        },
+    )
+)
+
+_register(
+    ToolSpec(
+        name="delete_collection",
+        description="Delete a RAG database and all its indexed data.",
+        access=WRITE,
+        handler=delete_collection,
+        params_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Database to delete."},
+                "confirm": {"type": "boolean", "default": False},
+            },
+            "required": ["name"],
         },
     )
 )
