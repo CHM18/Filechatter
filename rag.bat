@@ -82,7 +82,7 @@ if errorlevel 1 (
 
 echo.
 echo [INFO] Checking installed dependencies ...
-python -m pip check >nul 2>nul
+python -c "import fastapi" >nul 2>nul
 if errorlevel 1 (
     echo [INFO] Installing dependencies from requirements.txt ...
     python -m pip install -r "%REQ_FILE%"
