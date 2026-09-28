@@ -215,7 +215,10 @@ class IngestJobManager:
                             fh.write(f"SKIP (type not allowed in '{explicit_entry.name}'): {file_path}\n")
                         continue
 
-                    loaded_document = load_document(file_path)
+                    loaded_document = load_document(
+                        file_path,
+                        ocr_enabled=bool(explicit_entry.ocr_enabled) if explicit_entry is not None else False,
+                    )
                     target_collection = job.collection_name
                     if target_collection == "all":
                         target_collection = str(

@@ -416,9 +416,10 @@ def create_collection(
     name: str,
     description: str = "",
     allowed_extensions: list[str] | None = None,
+    ocr_enabled: bool = False,
 ) -> dict[str, Any]:
     """Create an empty collection through the global administration tool."""
-    entry = runtime.collections().create(name, description, allowed_extensions)
+    entry = runtime.collections().create(name, description, allowed_extensions, ocr_enabled=ocr_enabled)
     return runtime.collections().describe(entry.name)
 
 
@@ -472,6 +473,11 @@ _register(
                 "name": {"type": "string", "description": "New database name."},
                 "description": {"type": "string", "default": ""},
                 "allowed_extensions": {"type": "array", "items": {"type": "string"}, "default": []},
+                "ocr_enabled": {
+                    "type": "boolean",
+                    "description": "Run OCR (Tesseract) on scanned PDFs/images ingested into this database.",
+                    "default": False,
+                },
             },
             "required": ["name"],
         },

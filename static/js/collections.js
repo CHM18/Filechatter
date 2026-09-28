@@ -3,6 +3,7 @@
 
 const collectionsPanel = {
   catalog: [], // [{category, extensions:[{ext,available,dependency}]}]
+  ocrAvailable: false,
   selectedExts: new Set(),
   pendingDelete: null,
 
@@ -34,9 +35,12 @@ const collectionsPanel = {
 
     // Fetch the file-type catalog (categories + per-extension availability).
     try {
-      this.catalog = (await api.fileTypes()).categories || [];
+      const fileTypes = await api.fileTypes();
+      this.catalog = fileTypes.categories || [];
+      this.ocrAvailable = Boolean(fileTypes.ocr_available);
     } catch (_) {
       this.catalog = [];
+      this.ocrAvailable = false;
     }
 
     await this.refresh();
@@ -97,6 +101,8 @@ const collectionsPanel = {
       : '<span class="hint">all supported types</span>';
     const maybeRead = collection.read_allowed !== false;
     const maybeWrite = collection.write_allowed !== false;
+    const maybeOcr = collection.ocr_enabled === true;
+    const ocrState = this.ocrAvailable ? "" : "disabled title=\"Requires Tesseract OCR installed on the server\"";
     const readReachable = !permissionsPanel.settings || permissionsPanel.groupValue("read_tools") !== "deny";
     const writeReachable = !permissionsPanel.settings || permissionsPanel.groupValue("ingest_tools") !== "deny";
     const readState = readReachable ? "" : "disabled title=\"Read tools are denied globally\"";
@@ -108,6 +114,7 @@ const collectionsPanel = {
             <div class="permission-toggles">
               <label class="switch-inline ${readReachable ? "" : "permission-unreachable"}"><input type="checkbox" data-role="read" data-name="${escapeHtml(collection.name)}" ${maybeRead ? "checked" : ""} ${readState}> Read-enabled</label>
               <label class="switch-inline ${writeReachable ? "" : "permission-unreachable"}"><input type="checkbox" data-role="write" data-name="${escapeHtml(collection.name)}" ${maybeWrite ? "checked" : ""} ${writeState}> Write-enabled</label>
+              <label class="switch-inline" title="${this.ocrAvailable ? "" : "Requires Tesseract OCR installed on the server"}"><input type="checkbox" data-role="ocr" data-name="${escapeHtml(collection.name)}" ${maybeOcr ? "checked" : ""} ${ocrState}> Enable OCR</label>
             </div>
             <button class="btn btn-primary" data-save="${escapeHtml(collection.name)}">Apply</button>
           </div>
@@ -155,6 +162,7 @@ const collectionsPanel = {
       semantic_weight: Number(collection.semantic_weight ?? 1),
       keyword_weight: Number(collection.keyword_weight ?? 2),
       metadata_weight: Number(collection.metadata_weight ?? 4),
+      ocr_enabled: collection.ocr_enabled === true,
     };
   },
 
@@ -198,7 +206,8 @@ const collectionsPanel = {
       && left.write_allowed === right.write_allowed
       && left.semantic_weight === right.semantic_weight
       && left.keyword_weight === right.keyword_weight
-      && left.metadata_weight === right.metadata_weight;
+      && left.metadata_weight === right.metadata_weight
+      && left.ocr_enabled === right.ocr_enabled;
   },
 
   updateDirtyState(card) {
@@ -224,12 +233,14 @@ const collectionsPanel = {
     const stored = card._storedSettings;
     const read = card.querySelector('[data-role="read"]');
     const write = card.querySelector('[data-role="write"]');
+    const ocr = card.querySelector('[data-role="ocr"]');
     return {
       read_allowed: read.disabled ? stored.read_allowed : read.checked,
       write_allowed: write.disabled ? stored.write_allowed : write.checked,
       semantic_weight: Number(card.querySelector('[data-weight="semantic"]').value),
       keyword_weight: Number(card.querySelector('[data-weight="keyword"]').value),
       metadata_weight: Number(card.querySelector('[data-weight="metadata"]').value),
+      ocr_enabled: ocr.disabled ? stored.ocr_enabled : ocr.checked,
     };
   },
 
@@ -278,6 +289,15 @@ const collectionsPanel = {
     document.getElementById("create-description").value = "";
     document.getElementById("create-read-enabled").checked = true;
     document.getElementById("create-write-enabled").checked = true;
+    const ocrCheckbox = document.getElementById("create-ocr-enabled");
+    ocrCheckbox.checked = false;
+    ocrCheckbox.disabled = !this.ocrAvailable;
+    document.getElementById("create-ocr-label").title = this.ocrAvailable
+      ? ""
+      : "OCR requires Tesseract OCR to be installed on the server";
+    document.getElementById("create-ocr-hint").textContent = this.ocrAvailable
+      ? ""
+      : "(Tesseract OCR is not installed on the server)";
     document.getElementById("create-semantic-weight").value = "1.0";
     document.getElementById("create-keyword-weight").value = "2.0";
     document.getElementById("create-metadata-weight").value = "4.0";
@@ -374,6 +394,7 @@ const collectionsPanel = {
       semantic_weight: Number(document.getElementById("create-semantic-weight").value),
       keyword_weight: Number(document.getElementById("create-keyword-weight").value),
       metadata_weight: Number(document.getElementById("create-metadata-weight").value),
+      ocr_enabled: document.getElementById("create-ocr-enabled").checked,
     };
 
     try {

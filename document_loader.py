@@ -7,14 +7,22 @@ Readers fall into three groups:
 
 Extensions are organized into categories (Office / Text / Web / Data & Config
 / Code) that the web UI uses to offer grouped, then individual, selection.
+
+OCR (Tesseract, via pytesseract) is an opt-in, per-collection feature: when a
+collection has ocr_enabled=True, scanned PDFs (no text layer) and image files
+are run through OCR instead of / in addition to their normal reader, and
+embedded pictures inside .docx/.pptx/.xlsx are OCR'd inline as well.
 """
 from __future__ import annotations
 
 import base64
 import html as html_module
 import importlib.util
+import io
 import logging
 import re
+import shutil
+import warnings
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -31,6 +39,84 @@ logger = logging.getLogger(__name__)
 
 def _has_module(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
+
+
+# ----------------------------------------------------------------------
+# OCR (Tesseract via pytesseract) - optional, gated per collection
+# ----------------------------------------------------------------------
+
+_MIN_TEXT_LAYER_CHARS = 20  # below this, a PDF page/document is treated as "scanned"
+_MAX_OCR_IMAGE_DIMENSION_PX = 3500  # cap OCR input size: bounds runtime/memory on huge scans
+_OSD_PROBE_MAX_DIMENSION_PX = 1000  # orientation detection runs on a small downscaled probe
+
+
+def _has_tesseract_binary() -> bool:
+    configured = str(getattr(config, "OCR_TESSERACT_CMD", "") or "").strip()
+    if configured:
+        return Path(configured).is_file()
+    return shutil.which("tesseract") is not None
+
+
+def is_ocr_available() -> bool:
+    """Whether OCR can actually run: pytesseract installed AND the tesseract binary is reachable."""
+    return _has_module("pytesseract") and _has_tesseract_binary()
+
+
+def _configured_tesseract():
+    import pytesseract
+
+    configured = str(getattr(config, "OCR_TESSERACT_CMD", "") or "").strip()
+    if configured:
+        pytesseract.pytesseract.tesseract_cmd = configured
+    return pytesseract
+
+
+def _cap_image_dimensions(image):
+    """Downscale oversized images before OCR to bound runtime/memory (e.g. huge historical scans)."""
+    if max(image.size) > _MAX_OCR_IMAGE_DIMENSION_PX:
+        scale = _MAX_OCR_IMAGE_DIMENSION_PX / max(image.size)
+        new_size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+        return image.resize(new_size)
+    return image
+
+
+def _correct_orientation(pytesseract, image):
+    """Cheap OSD pass on a small downscaled probe to auto-correct sideways/upside-down scans."""
+    probe = image
+    if max(image.size) > _OSD_PROBE_MAX_DIMENSION_PX:
+        scale = _OSD_PROBE_MAX_DIMENSION_PX / max(image.size)
+        probe = image.resize((max(1, int(image.width * scale)), max(1, int(image.height * scale))))
+    try:
+        osd = pytesseract.image_to_osd(probe, output_type=pytesseract.Output.DICT)
+        rotation = int(osd.get("rotate", 0)) % 360
+    except Exception as exc:
+        # OSD needs a minimum amount of legible text; small/blank images routinely fail this.
+        logger.debug("OSD orientation detection skipped: %s", exc)
+        return image
+    return image.rotate(-rotation, expand=True) if rotation else image
+
+
+def _ocr_pil_image(image) -> str:
+    if not is_ocr_available():
+        raise RuntimeError(
+            "OCR requires the optional dependency 'pytesseract' and a Tesseract OCR "
+            "installation on the host (the binary cannot be installed via pip)."
+        )
+    pytesseract = _configured_tesseract()
+    image = _correct_orientation(pytesseract, image)
+    return pytesseract.image_to_string(image, lang=config.OCR_LANGUAGE).strip()
+
+
+def _ocr_image_bytes(data: bytes) -> str:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("OCR requires the optional dependency 'Pillow'.") from exc
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+        with Image.open(io.BytesIO(data)) as image:
+            rgb = _cap_image_dimensions(image.convert("RGB"))
+    return _ocr_pil_image(rgb)
 
 
 # ----------------------------------------------------------------------
@@ -63,19 +149,128 @@ def _read_pdf(path: Path) -> str:
     return "\n\n".join((page.extract_text() or "") for page in reader.pages)
 
 
-def _read_docx(path: Path) -> str:
+def _read_pdf_pages(path: Path) -> list[str]:
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise RuntimeError("Reading .pdf files requires the optional dependency 'pypdf'.") from exc
+    reader = PdfReader(str(path))
+    return [(page.extract_text() or "") for page in reader.pages]
+
+
+def _read_pdf_with_ocr(path: Path, text_pages: list[str]) -> tuple[str, dict[str, Any]]:
+    """OCR pages that need it: fully rasterize pages with no usable text layer, and
+    additionally OCR any embedded raster images on otherwise-text pages (e.g. a
+    background photo of a bill with a thin real text layer on top of it), without
+    re-rendering/re-OCRing the whole page in that second case."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as exc:
+        raise RuntimeError("Scanned-PDF OCR requires the optional dependency 'pymupdf'.") from exc
+
+    parts: list[str] = []
+    ocr_pages = 0
+    ocr_image_count = 0
+    document = fitz.open(str(path))
+    try:
+        for index, page in enumerate(document):
+            existing_text = text_pages[index] if index < len(text_pages) else ""
+            if len(existing_text.strip()) < _MIN_TEXT_LAYER_CHARS:
+                # Likely a fully scanned page: OCR the whole rendered page. Cap the
+                # render DPI so physically large pages (e.g. historical A3 scans)
+                # don't blow up into huge, slow-to-OCR pixmaps.
+                long_side_inches = max(page.rect.width, page.rect.height) / 72.0
+                dpi = 300
+                if long_side_inches > 0:
+                    dpi = max(100, min(300, int(_MAX_OCR_IMAGE_DIMENSION_PX / long_side_inches)))
+                pixmap = page.get_pixmap(dpi=dpi)
+                try:
+                    ocr_text = _ocr_image_bytes(pixmap.tobytes("png"))
+                except Exception as exc:
+                    logger.warning("OCR failed on %s page %d: %s", path, index + 1, exc)
+                    ocr_text = existing_text
+                else:
+                    ocr_pages += 1
+                parts.append(ocr_text)
+                continue
+
+            # Page already has a usable text layer; only OCR embedded raster
+            # images (e.g. a background photo) to catch any extra text in them.
+            page_parts = [existing_text]
+            for image_info in page.get_images(full=True):
+                xref = image_info[0]
+                try:
+                    image_bytes = document.extract_image(xref)["image"]
+                    ocr_text = _ocr_image_bytes(image_bytes)
+                except Exception as exc:
+                    logger.warning("Embedded-image OCR failed on %s page %d: %s", path, index + 1, exc)
+                    continue
+                if ocr_text:
+                    ocr_image_count += 1
+                    page_parts.append(f"[Image OCR]: {ocr_text}")
+            parts.append("\n".join(page_parts))
+    finally:
+        document.close()
+
+    metadata: dict[str, Any] = {}
+    if ocr_pages or ocr_image_count:
+        metadata = {
+            "extraction_method": "ocr" if ocr_pages == len(parts) and not ocr_image_count else "mixed",
+            "ocr_used": True,
+            "ocr_language": config.OCR_LANGUAGE,
+            "ocr_pages": ocr_pages,
+            "ocr_image_count": ocr_image_count,
+        }
+    return "\n\n".join(parts), metadata
+
+
+def _read_docx(path: Path, ocr_enabled: bool = False) -> tuple[str, dict[str, Any]]:
     try:
         from docx import Document as DocxDocument
     except ImportError as exc:
         raise RuntimeError("Reading .docx files requires the optional dependency 'python-docx'.") from exc
     document = DocxDocument(str(path))
     paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
+
+    ocr_image_count = 0
+    if ocr_enabled and is_ocr_available():
+        paragraphs = []
+        blip_tag = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
+        for paragraph in document.paragraphs:
+            if paragraph.text.strip():
+                paragraphs.append(paragraph.text)
+            for blip in paragraph._element.findall(f".//{blip_tag}"):
+                relationship_id = blip.get(
+                    "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+                )
+                if not relationship_id:
+                    continue
+                try:
+                    image_part = document.part.related_parts[relationship_id]
+                    ocr_text = _ocr_image_bytes(image_part.blob)
+                except Exception as exc:
+                    logger.warning("Embedded-image OCR failed in %s: %s", path, exc)
+                    continue
+                if ocr_text:
+                    ocr_image_count += 1
+                    paragraphs.append(f"[Image OCR]: {ocr_text}")
+        # Note: images embedded directly inside table cells are not walked here.
+
     for table in document.tables:
         for row in table.rows:
             cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
             if cells:
                 paragraphs.append(" | ".join(cells))
-    return "\n".join(paragraphs)
+
+    metadata: dict[str, Any] = {}
+    if ocr_image_count:
+        metadata = {
+            "extraction_method": "mixed",
+            "ocr_used": True,
+            "ocr_language": config.OCR_LANGUAGE,
+            "ocr_image_count": ocr_image_count,
+        }
+    return "\n".join(paragraphs), metadata
 
 
 def _read_doc(path: Path) -> str:
@@ -96,32 +291,76 @@ def _read_doc(path: Path) -> str:
         word.Quit()
 
 
-def _read_xlsx(path: Path) -> str:
+def _read_xlsx(path: Path, ocr_enabled: bool = False) -> tuple[str, dict[str, Any]]:
     try:
         import openpyxl
     except ImportError as exc:
         raise RuntimeError("Reading .xlsx files requires the optional dependency 'openpyxl'.") from exc
-    workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+
+    # read_only mode is faster but doesn't expose embedded images, so only pay
+    # for a full-load pass when OCR was actually requested and is available.
+    use_ocr = ocr_enabled and is_ocr_available()
+    workbook = openpyxl.load_workbook(str(path), read_only=not use_ocr, data_only=True)
     parts: list[str] = []
+    ocr_image_count = 0
     try:
         for worksheet in workbook.worksheets:
             parts.append(f"# Sheet: {worksheet.title}")
-            for row in worksheet.iter_rows(values_only=True):
+            images_by_row: dict[int, list[Any]] = {}
+            if use_ocr:
+                for image in getattr(worksheet, "_images", []):
+                    anchor_row = getattr(getattr(image, "anchor", None), "_from", None)
+                    row_index = getattr(anchor_row, "row", None)
+                    images_by_row.setdefault(row_index if row_index is not None else -1, []).append(image)
+
+            for row_index, row in enumerate(worksheet.iter_rows(values_only=True)):
                 cells = [str(cell) for cell in row if cell is not None]
                 if cells:
                     parts.append(" | ".join(cells))
+                for image in images_by_row.pop(row_index, []):
+                    try:
+                        ocr_text = _ocr_image_bytes(image._data())
+                    except Exception as exc:
+                        logger.warning("Embedded-image OCR failed in %s: %s", path, exc)
+                        continue
+                    if ocr_text:
+                        ocr_image_count += 1
+                        parts.append(f"[Image OCR @ row {row_index + 1}]: {ocr_text}")
+            # Images anchored beyond the last data row (or with an unknown anchor).
+            for remaining in images_by_row.values():
+                for image in remaining:
+                    try:
+                        ocr_text = _ocr_image_bytes(image._data())
+                    except Exception as exc:
+                        logger.warning("Embedded-image OCR failed in %s: %s", path, exc)
+                        continue
+                    if ocr_text:
+                        ocr_image_count += 1
+                        parts.append(f"[Image OCR]: {ocr_text}")
     finally:
         workbook.close()
-    return "\n".join(parts)
+
+    metadata: dict[str, Any] = {}
+    if ocr_image_count:
+        metadata = {
+            "extraction_method": "mixed",
+            "ocr_used": True,
+            "ocr_language": config.OCR_LANGUAGE,
+            "ocr_image_count": ocr_image_count,
+        }
+    return "\n".join(parts), metadata
 
 
-def _read_pptx(path: Path) -> str:
+def _read_pptx(path: Path, ocr_enabled: bool = False) -> tuple[str, dict[str, Any]]:
     try:
         from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
     except ImportError as exc:
         raise RuntimeError("Reading .pptx files requires the optional dependency 'python-pptx'.") from exc
     presentation = Presentation(str(path))
     parts: list[str] = []
+    use_ocr = ocr_enabled and is_ocr_available()
+    ocr_image_count = 0
     for index, slide in enumerate(presentation.slides, start=1):
         parts.append(f"# Slide {index}")
         for shape in slide.shapes:
@@ -135,7 +374,25 @@ def _read_pptx(path: Path) -> str:
                     cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
                     if cells:
                         parts.append(" | ".join(cells))
-    return "\n".join(parts)
+            if use_ocr and shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                try:
+                    ocr_text = _ocr_image_bytes(shape.image.blob)
+                except Exception as exc:
+                    logger.warning("Embedded-image OCR failed in %s: %s", path, exc)
+                    continue
+                if ocr_text:
+                    ocr_image_count += 1
+                    parts.append(f"[Image OCR]: {ocr_text}")
+
+    metadata: dict[str, Any] = {}
+    if ocr_image_count:
+        metadata = {
+            "extraction_method": "mixed",
+            "ocr_used": True,
+            "ocr_language": config.OCR_LANGUAGE,
+            "ocr_image_count": ocr_image_count,
+        }
+    return "\n".join(parts), metadata
 
 
 _IMAGE_MIME = {
@@ -282,6 +539,37 @@ def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
     return "\n".join(lines).strip(), metadata
 
 
+def _read_image_ocr(path: Path) -> tuple[str, dict[str, Any]]:
+    ocr_text = _ocr_pil_image(_open_image_rgb(path))
+
+    lines = [
+        f"Image file: {path.name}",
+        f"Folder: {path.parent.name}",
+        f"Full path: {path}",
+        "OCR text:",
+        ocr_text or "(no text detected)",
+    ]
+
+    metadata = {
+        "content_kind": "image",
+        "extraction_method": "ocr",
+        "ocr_used": True,
+        "ocr_language": config.OCR_LANGUAGE,
+    }
+    return "\n".join(lines).strip(), metadata
+
+
+def _open_image_rgb(path: Path):
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("OCR requires the optional dependency 'Pillow'.") from exc
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+        with Image.open(path) as image:
+            return _cap_image_dimensions(image.convert("RGB"))
+
+
 # ----------------------------------------------------------------------
 # Categories and reader registry
 # ----------------------------------------------------------------------
@@ -301,6 +589,9 @@ FILE_TYPE_CATEGORIES: dict[str, list[str]] = {
 }
 
 # Dedicated parsers; everything else in the catalog is read as plain text.
+# Note: load_document() special-cases .pdf/.docx/.xlsx/.pptx directly (for OCR
+# support) rather than calling through this dict; it stays here only for
+# SUPPORTED_EXTENSIONS/availability bookkeeping below.
 _SPECIAL_READERS = {
     ".pdf": _read_pdf,
     ".docx": _read_docx,
@@ -416,15 +707,47 @@ def infer_collection_name(path: Path) -> str:
     return "documentation"
 
 
-def load_document(path: Path) -> LoadedDocument:
+def load_document(path: Path, *, ocr_enabled: bool = False) -> LoadedDocument:
     resolved_path = path.expanduser().resolve()
     if not is_supported_file(resolved_path):
         raise ValueError(f"Unsupported file type: {resolved_path.suffix or '<none>'}")
 
     extension = resolved_path.suffix.lower()
     extra_metadata: dict[str, Any] = {}
+    use_ocr = ocr_enabled and is_ocr_available()
+
     if extension in FILE_TYPE_CATEGORIES["Images"]:
-        content, extra_metadata = _read_image(resolved_path)
+        if use_ocr:
+            content, extra_metadata = _read_image_ocr(resolved_path)
+        else:
+            content, extra_metadata = _read_image(resolved_path)
+            if ocr_enabled:
+                extra_metadata["ocr_requested_but_unavailable"] = True
+    elif extension == ".pdf":
+        text_pages = _read_pdf_pages(resolved_path)
+        if use_ocr:
+            body, extra_metadata = _read_pdf_with_ocr(resolved_path, text_pages)
+        else:
+            body = "\n\n".join(text_pages)
+        if ocr_enabled and not is_ocr_available():
+            extra_metadata["ocr_requested_but_unavailable"] = True
+        content = (
+            f"Source file: {resolved_path.name}\n"
+            f"Source folder: {resolved_path.parent.name}\n"
+            f"Full path: {resolved_path}\n\n"
+            f"{body.strip()}"
+        ).strip()
+    elif extension in (".docx", ".xlsx", ".pptx"):
+        reader = {".docx": _read_docx, ".xlsx": _read_xlsx, ".pptx": _read_pptx}[extension]
+        body, extra_metadata = reader(resolved_path, ocr_enabled=use_ocr)
+        if ocr_enabled and not is_ocr_available():
+            extra_metadata["ocr_requested_but_unavailable"] = True
+        content = (
+            f"Source file: {resolved_path.name}\n"
+            f"Source folder: {resolved_path.parent.name}\n"
+            f"Full path: {resolved_path}\n\n"
+            f"{body.strip()}"
+        ).strip()
     else:
         reader = READERS[extension]
         body = reader(resolved_path).strip()
@@ -449,6 +772,7 @@ def load_document(path: Path) -> LoadedDocument:
         "content_type": collection_name,
     }
     metadata.update(extra_metadata)
+    metadata.setdefault("ocr_used", False)
     return LoadedDocument(path=resolved_path, content=content, metadata=metadata)
 
 

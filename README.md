@@ -407,6 +407,8 @@ The server can be configured using environment variables. Copy `.env.example` to
 - `IMAGE_VISION_TIMEOUT`: Timeout for image-analysis requests in seconds
 - `IMAGE_VISION_MAX_TOKENS`: Maximum output tokens for image summaries
 - `IMAGE_EXIF_FIELDS`: Comma-separated EXIF tags to persist when present
+- `OCR_LANGUAGE`: Tesseract language string used when OCR is enabled for a database, e.g. `deu+eng` (default: `deu+eng`)
+- `OCR_TESSERACT_CMD`: Optional absolute path to `tesseract.exe`, only needed if it isn't on `PATH`
 - `DATA_DIR`: Directory for SQLite and FAISS persistence (default: ./data)
 - `CHUNK_SIZE_CHARS`: Chunk size before embedding (default: 1800)
 - `CHUNK_OVERLAP_CHARS`: Overlap between adjacent chunks (default: 250)
@@ -491,6 +493,29 @@ Tests run against a temporary data directory with a deterministic fake embedding
 - `.docx` is read directly in Python
 - `.doc` requires Microsoft Word automation on Windows in this implementation
 - If you need platform-independent `.doc` support, convert legacy `.doc` files to `.docx` first
+
+### OCR setup (scanned bills, receipts, and photographed documents)
+OCR is an opt-in, per-database setting ("Enable OCR" checkbox on a database card in the web UI). When enabled for a
+database, Filechatter will:
+- OCR image files (`.jpg`, `.png`, etc.) instead of sending them to the vision model
+- automatically fall back to OCR for PDF pages that have no extractable text layer (scanned PDFs)
+- OCR pictures embedded inside `.docx`/`.pptx`/`.xlsx` files
+
+Unlike the Python packages in `requirements.txt`, the Tesseract OCR engine itself is a **system binary** and must be
+installed separately:
+- Windows: `winget install UB-Mannheim.TesseractOCR`, or download the installer from the
+  [UB Mannheim Tesseract builds](https://github.com/UB-Mannheim/tesseract/wiki) - make sure to include the German
+  language pack in the installer's component selection (English is bundled by default)
+- Linux: `sudo apt install tesseract-ocr tesseract-ocr-deu`
+- macOS: `brew install tesseract tesseract-lang`
+
+If `tesseract` isn't on your `PATH` after installing, set `OCR_TESSERACT_CMD` in `.env` to the full path of
+`tesseract.exe`. The "Enable OCR" checkbox in the web UI is greyed out automatically until Filechatter detects a
+working Tesseract installation.
+
+OCR is significantly slower than normal text extraction (roughly 1-5 seconds per scanned page/photo vs.
+milliseconds for a digital document), so it's recommended to keep OCR-heavy collections (e.g. scanned bills)
+separate from collections that don't need it (e.g. plain photos).
 
 ## License
 

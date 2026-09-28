@@ -353,6 +353,7 @@ class RagStore:
         self.semantic_weight = max(0.0, min(10.0, float(settings.get("semantic_weight", 1.0))))
         self.keyword_weight = max(0.0, min(10.0, float(settings.get("keyword_weight", 2.0))))
         self.metadata_weight = max(0.0, min(10.0, float(settings.get("metadata_weight", 4.0))))
+        self.ocr_enabled = bool(settings.get("ocr_enabled", False))
 
     def reload(self) -> None:
         with self._lock:

@@ -202,6 +202,7 @@ class CollectionCreateRequest(BaseModel):
     semantic_weight: float = 1.0
     keyword_weight: float = 2.0
     metadata_weight: float = 4.0
+    ocr_enabled: bool = False
 
 
 class CollectionUpdateRequest(BaseModel):
@@ -212,6 +213,7 @@ class CollectionUpdateRequest(BaseModel):
     semantic_weight: float | None = None
     keyword_weight: float | None = None
     metadata_weight: float | None = None
+    ocr_enabled: bool | None = None
 
 
 class ToolCallRequest(BaseModel):
@@ -291,9 +293,9 @@ async def health_check():
 @app.get("/file-types")
 async def file_types():
     """File-type categories with per-extension availability (for the UI selector)."""
-    from document_loader import file_type_catalog
+    from document_loader import file_type_catalog, is_ocr_available
 
-    return {"categories": file_type_catalog()}
+    return {"categories": file_type_catalog(), "ocr_available": is_ocr_available()}
 
 
 @app.get("/collections")
@@ -319,6 +321,7 @@ async def create_collection(request: CollectionCreateRequest):
             semantic_weight=request.semantic_weight,
             keyword_weight=request.keyword_weight,
             metadata_weight=request.metadata_weight,
+            ocr_enabled=request.ocr_enabled,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -338,6 +341,7 @@ async def update_collection(name: str, request: CollectionUpdateRequest):
             semantic_weight=request.semantic_weight,
             keyword_weight=request.keyword_weight,
             metadata_weight=request.metadata_weight,
+            ocr_enabled=request.ocr_enabled,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown collection: {name}")

@@ -57,6 +57,12 @@ IMAGE_EXIF_FIELDS = _csv_list(
     )
 )
 
+# OCR (Tesseract via pytesseract) - opt-in per collection, see collections_manager.ocr_enabled.
+# The Tesseract binary is a manual system install (not pip-installable); see README.
+OCR_LANGUAGE = os.getenv("OCR_LANGUAGE", "deu+eng")
+OCR_TESSERACT_CMD = os.getenv("OCR_TESSERACT_CMD", "")
+
+
 CHUNK_SIZE_CHARS = int(os.getenv("CHUNK_SIZE_CHARS", "1800"))
 CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "250"))
 CHUNK_SPLIT_MARGIN = int(os.getenv("CHUNK_SPLIT_MARGIN", "400"))

@@ -113,6 +113,7 @@ class CollectionEntry:
     semantic_weight: float = 1.0
     keyword_weight: float = 2.0
     metadata_weight: float = 4.0
+    ocr_enabled: bool = False
 
     @staticmethod
     def _coerce_bool(value: Any, default: bool) -> bool:
@@ -152,6 +153,7 @@ class CollectionEntry:
             "semantic_weight": float(self.semantic_weight),
             "keyword_weight": float(self.keyword_weight),
             "metadata_weight": float(self.metadata_weight),
+            "ocr_enabled": self.ocr_enabled,
         }
 
     @classmethod
@@ -167,6 +169,7 @@ class CollectionEntry:
             semantic_weight=cls._coerce_weight(data.get("semantic_weight"), 1.0),
             keyword_weight=cls._coerce_weight(data.get("keyword_weight"), 2.0),
             metadata_weight=cls._coerce_weight(data.get("metadata_weight"), 4.0),
+            ocr_enabled=cls._coerce_bool(data.get("ocr_enabled"), False),
         )
 
     def allows_extension(self, extension: str) -> bool:
@@ -299,6 +302,7 @@ class CollectionsManager:
         semantic_weight: float = 1.0,
         keyword_weight: float = 2.0,
         metadata_weight: float = 4.0,
+        ocr_enabled: bool = False,
     ) -> CollectionEntry:
         normalized = name.strip().lower()
         self.validate_name(normalized)
@@ -314,6 +318,7 @@ class CollectionsManager:
                 semantic_weight=CollectionEntry._coerce_weight(semantic_weight, 1.0),
                 keyword_weight=CollectionEntry._coerce_weight(keyword_weight, 2.0),
                 metadata_weight=CollectionEntry._coerce_weight(metadata_weight, 4.0),
+                ocr_enabled=CollectionEntry._coerce_bool(ocr_enabled, False),
             )
             self._entries[normalized] = entry
             self._save()
@@ -354,6 +359,7 @@ class CollectionsManager:
         semantic_weight: float | None = None,
         keyword_weight: float | None = None,
         metadata_weight: float | None = None,
+        ocr_enabled: bool | None = None,
     ) -> CollectionEntry:
         normalized = self.normalize_name(name)
         with self._lock:
@@ -374,6 +380,8 @@ class CollectionsManager:
                 entry.keyword_weight = CollectionEntry._coerce_weight(keyword_weight, entry.keyword_weight)
             if metadata_weight is not None:
                 entry.metadata_weight = CollectionEntry._coerce_weight(metadata_weight, entry.metadata_weight)
+            if ocr_enabled is not None:
+                entry.ocr_enabled = CollectionEntry._coerce_bool(ocr_enabled, entry.ocr_enabled)
             self._save()
             store = self._stores.get(normalized)
             if store is not None:

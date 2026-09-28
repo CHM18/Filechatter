@@ -111,6 +111,25 @@ class TestCreate:
         with pytest.raises(ValueError):
             manager.ensure("all")
 
+    def test_ocr_enabled_defaults_false_and_persists(self, manager):
+        entry = manager.create("bills")
+        assert entry.ocr_enabled is False
+
+        updated = manager.update_entry("bills", ocr_enabled=True)
+        assert updated.ocr_enabled is True
+        assert manager.get_store("bills").ocr_enabled is True
+
+        manager.close_all()
+        reloaded = CollectionsManager(manager.data_dir)
+        persisted = reloaded.get_entry("bills")
+        assert persisted is not None
+        assert persisted.to_dict()["ocr_enabled"] is True
+
+    def test_create_with_ocr_enabled(self, manager):
+        entry = manager.create("scans", ocr_enabled=True)
+        assert entry.ocr_enabled is True
+        assert manager.get_store("scans").ocr_enabled is True
+
 
 class TestAllowsExtension:
     def test_empty_allows_everything(self, manager):
