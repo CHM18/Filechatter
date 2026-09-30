@@ -98,13 +98,88 @@ class TestSupportAndCatalog:
         path = tmp_path / "image.png"
         path.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-        monkeypatch.setattr(dl, "_summarize_image_with_llm", lambda _path: "A scenic mountain view.")
+        monkeypatch.setattr(
+            dl,
+            "_summarize_image_with_llm",
+            lambda _path: "A scenic mountain view.\nSearchable keywords: mountain, alpine lake, hiking",
+        )
         monkeypatch.setattr(dl, "_extract_image_exif", lambda _path: {"Make": "Canon"})
 
         loaded = dl.load_document(path)
         assert "A scenic mountain view." in loaded.content
+        assert "Searchable keywords: mountain, alpine lake, hiking" in loaded.content
         assert loaded.metadata["content_kind"] == "image"
+        assert loaded.metadata["image_summary"] == "A scenic mountain view."
+        assert loaded.metadata["image_keywords"] == ["mountain", "alpine lake", "hiking"]
         assert loaded.metadata["image_exif"]["Make"] == "Canon"
+
+    def test_vision_corrects_exif_orientation_without_changing_source(self, tmp_path, monkeypatch):
+        import base64
+        import io
+        from PIL import Image
+
+        path = tmp_path / "oriented.jpg"
+        exif = Image.Exif()
+        exif[274] = 6
+        Image.new("RGB", (4, 2), "red").save(path, exif=exif)
+        original = path.read_bytes()
+        captured = {}
+
+        class Response:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content": "A red image."}}]}
+
+        monkeypatch.setattr(dl.config, "IMAGE_VISION_BASE_URL", "http://localhost:1234")
+        monkeypatch.setattr(dl.config, "IMAGE_VISION_MODEL", "test-model")
+        monkeypatch.setattr(dl.requests, "post", lambda _url, **kwargs: captured.update(kwargs) or Response())
+
+        assert dl._summarize_image_with_llm(path) == "A red image."
+
+        payload = captured["json"]
+        prompt = payload["messages"][0]["content"][0]["text"]
+        assert "Searchable keywords:" in prompt
+        encoded = payload["messages"][0]["content"][1]["image_url"]["url"].split(",", 1)[1]
+        corrected_bytes = base64.b64decode(encoded)
+        with Image.open(io.BytesIO(corrected_bytes)) as corrected:
+            assert corrected.size == (2, 4)
+            assert corrected.getexif().get(274) in (None, 1)
+        assert path.read_bytes() == original
+
+    @pytest.mark.parametrize("orientation", [None, 1])
+    def test_vision_does_not_rotate_image_without_needed_correction(self, tmp_path, monkeypatch, orientation):
+        import base64
+        from PIL import Image
+
+        path = tmp_path / "already-rotated.jpg"
+        image = Image.new("RGB", (2, 4), "blue")
+        if orientation is None:
+            image.save(path)
+        else:
+            exif = Image.Exif()
+            exif[274] = orientation
+            image.save(path, exif=exif)
+        original = path.read_bytes()
+        captured = {}
+
+        class Response:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content": "A blue image."}}]}
+
+        monkeypatch.setattr(dl.config, "IMAGE_VISION_BASE_URL", "http://localhost:1234")
+        monkeypatch.setattr(dl.config, "IMAGE_VISION_MODEL", "test-model")
+        monkeypatch.setattr(dl.requests, "post", lambda _url, **kwargs: captured.update(kwargs) or Response())
+
+        dl._summarize_image_with_llm(path)
+
+        encoded = captured["json"]["messages"][0]["content"][1]["image_url"]["url"].split(",", 1)[1]
+        assert base64.b64decode(encoded) == original
+        assert path.read_bytes() == original
 
     def test_unsupported_extension_rejected(self, tmp_path):
         path = tmp_path / "blob.bin"

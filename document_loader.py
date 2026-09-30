@@ -421,6 +421,30 @@ def _normalize_base_url(base_url: str | None) -> str:
     return value.rstrip("/")
 
 
+def _image_bytes_for_vision(path: Path) -> tuple[bytes, str]:
+    data = path.read_bytes()
+    mime = _IMAGE_MIME.get(path.suffix.lower(), "image/jpeg")
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise RuntimeError("Reading image orientation requires the optional dependency 'Pillow'.") from exc
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+        with Image.open(io.BytesIO(data)) as image:
+            orientation = image.getexif().get(274)
+            if orientation not in range(2, 9):
+                return data, mime
+
+            corrected = ImageOps.exif_transpose(image)
+            output = io.BytesIO()
+            save_options: dict[str, Any] = {"format": image.format}
+            if image.format == "JPEG":
+                save_options["quality"] = 95
+            corrected.save(output, **save_options)
+            return output.getvalue(), mime
+
+
 def _extract_image_exif(path: Path) -> dict[str, Any]:
     try:
         from PIL import ExifTags, Image
@@ -451,13 +475,17 @@ def _summarize_image_with_llm(path: Path) -> str:
     if not model:
         raise RuntimeError("Image vision model is empty. Set IMAGE_VISION_MODEL.")
 
-    mime = _IMAGE_MIME.get(path.suffix.lower(), "image/jpeg")
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    image_data, mime = _image_bytes_for_vision(path)
+    encoded = base64.b64encode(image_data).decode("ascii")
     file_context = f"File name: {path.name}. Folder: {path.parent.name}."
     prompt = (
         "Describe this image for retrieval in a local RAG index. "
         "Include visible entities, scene, activities, text shown in the image, approximate place/time cues, "
-        "and notable colors/objects. Keep it factual and concise in 4-8 sentences. "
+        "and notable colors/objects. Keep the description factual and concise in 4-8 sentences. "
+        "After the description, add a separate line exactly in this format: "
+        "Searchable keywords: term one, term two, term three. "
+        "Use concise searchable terms for visible entities, scene, activities, readable text, and notable colors/objects; "
+        "include place/time cues only when supported by the image. Do not invent details. "
         f"{file_context}"
     )
 
@@ -512,8 +540,24 @@ def _summarize_image_with_llm(path: Path) -> str:
     return summary
 
 
+def _parse_image_analysis(response: str) -> tuple[str, list[str]]:
+    sections = re.split(r"(?im)^\s*searchable keywords\s*:\s*", response, maxsplit=1)
+    description = re.sub(r"(?im)^\s*description\s*:\s*", "", sections[0], count=1).strip()
+    keywords: list[str] = []
+    if len(sections) > 1:
+        seen: set[str] = set()
+        for keyword in re.split(r"[,;]", sections[1].splitlines()[0]):
+            cleaned = keyword.strip(" \t-*.")
+            normalized = cleaned.casefold()
+            if cleaned and normalized not in seen:
+                keywords.append(cleaned)
+                seen.add(normalized)
+    return description, keywords
+
+
 def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
-    summary = _summarize_image_with_llm(path)
+    analysis = _summarize_image_with_llm(path)
+    summary, keywords = _parse_image_analysis(analysis)
     exif = _extract_image_exif(path)
 
     lines = [
@@ -523,6 +567,8 @@ def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
         "Vision summary:",
         summary,
     ]
+    if keywords:
+        lines.append(f"Searchable keywords: {', '.join(keywords)}")
     if exif:
         lines.append("EXIF metadata:")
         for key in config.IMAGE_EXIF_FIELDS:
@@ -533,6 +579,7 @@ def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
     metadata = {
         "content_kind": "image",
         "image_summary": summary,
+        "image_keywords": keywords,
         "image_exif": exif,
         "image_vision_model": config.IMAGE_VISION_MODEL,
     }
