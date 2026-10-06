@@ -47,6 +47,60 @@ class TestFileTypesApi:
         assert {".pdf", ".xlsx", ".pptx"}.issubset(exts)
 
 
+class TestChunkExportApi:
+    def test_export_downloads_all_source_chunks_as_markdown(self, client, monkeypatch):
+        import rag_server
+
+        source = "C:/docs/annual-report.pdf"
+        chunks = [
+            {
+                "id": index + 1,
+                "source": source,
+                "content": f"Review text for chunk {index}.",
+                "chunk_index": index,
+                "start_char": index * 100,
+                "end_char": (index + 1) * 100,
+                "collection_name": "reports",
+            }
+            for index in range(205)
+        ]
+
+        class Store:
+            def get_chunks(self, *, source, limit, offset):
+                assert source == "C:/docs/annual-report.pdf"
+                return chunks[offset : offset + limit]
+
+        class Manager:
+            def normalize_name(self, name):
+                return name
+
+            def selected_stores(self, _name):
+                return [Store()]
+
+            def close_all(self):
+                pass
+
+        monkeypatch.setattr(rag_server.runtime, "collections", lambda: Manager())
+
+        response = client.get(
+            "/chunks/export.md",
+            params={"source": source, "collection_name": "reports"},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/markdown")
+        assert response.headers["content-disposition"] == 'attachment; filename="annual-report-chunks.md"'
+        assert "# Chunks: annual-report.pdf" in response.text
+        assert "- Chunk count: 205" in response.text
+        assert "## Chunk 204" in response.text
+        assert "Review text for chunk 204." in response.text
+
+    def test_export_requires_source(self, client):
+        response = client.get("/chunks/export.md")
+
+        assert response.status_code == 400
+
+
 class TestCollectionsApi:
     def test_create_and_list(self, client):
         response = client.post(

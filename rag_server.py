@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import requests
@@ -859,6 +859,69 @@ async def list_chunks(
             "chunks": chunks,
         }
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chunks/export.md")
+async def export_chunks_markdown(
+    source: str | None = None,
+    collection_name: str = "all",
+):
+    """Download all indexed chunks for one source as a Markdown file."""
+    if not source or not source.strip():
+        raise HTTPException(status_code=400, detail="A source path is required.")
+
+    try:
+        manager = runtime.collections()
+        normalized_collection = manager.normalize_name(collection_name)
+        chunks: list[dict[str, Any]] = []
+        page_size = 200
+        for store in manager.selected_stores(normalized_collection):
+            offset = 0
+            while True:
+                page = store.get_chunks(source=source, limit=page_size, offset=offset)
+                chunks.extend(page)
+                if len(page) < page_size:
+                    break
+                offset += len(page)
+
+        if not chunks:
+            raise HTTPException(status_code=404, detail="No chunks found for this source.")
+
+        chunks.sort(key=lambda item: (item["collection_name"], item["chunk_index"], item["id"]))
+        lines = [
+            f"# Chunks: {Path(source).name or source}",
+            "",
+            f"- Source: {source}",
+            f"- Collection: {normalized_collection}",
+            f"- Chunk count: {len(chunks)}",
+        ]
+        for chunk in chunks:
+            lines.extend(
+                [
+                    "",
+                    "---",
+                    "",
+                    f"## Chunk {chunk['chunk_index']}",
+                    "",
+                    f"- Collection: {chunk['collection_name']}",
+                    f"- Character offsets: {chunk['start_char']}-{chunk['end_char']}",
+                    "",
+                    chunk["content"],
+                ]
+            )
+
+        markdown = "\n".join(lines).rstrip() + "\n"
+        filename = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(source).stem).strip("-._") or "document"
+        return Response(
+            content=markdown,
+            media_type="text/markdown",
+            headers={"Content-Disposition": f'attachment; filename="{filename}-chunks.md"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Chunk Markdown export failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
