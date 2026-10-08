@@ -1,4 +1,5 @@
 """CLI for Filechatter RAG Server"""
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +16,19 @@ app = typer.Typer(help="Filechatter CLI - Chat with your documents via LM Studio
 console = Console()
 
 DEFAULT_SERVER = "http://localhost:8000"
+
+
+@app.callback()
+def configure_output() -> None:
+    """Preserve document Unicode in terminal output and redirected dumps."""
+    if sys.platform == "win32" and any(stream.isatty() for stream in (sys.stdout, sys.stderr)):
+        import ctypes
+
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
 def get_server_url(server: Optional[str] = None) -> str:
@@ -262,7 +276,7 @@ def list_docs(
 def dump_chunks(
     source: Optional[str] = typer.Argument(
         None,
-        help="Exact source file name to inspect; omit to inspect the first chunks across all sources"
+        help="Source path or file name to inspect; omit to inspect the first chunks across all sources"
     ),
     limit: int = typer.Option(5, "--limit", "-n", help="Number of chunks to print"),
     offset: int = typer.Option(0, "--offset", help="Chunk offset for pagination"),
@@ -279,14 +293,12 @@ def dump_chunks(
     def print_chunks(chunks: list[dict]) -> None:
         if not chunks:
             console.print("[yellow]No chunks found for the requested source[/yellow]")
-            raise typer.Exit(0)
+            return
 
-        for chunk in chunks:
-            header = (
-                f"{chunk['source']} | chunk {chunk['chunk_index']} | "
-                f"chars {chunk['start_char']}-{chunk['end_char']}"
-            )
-            console.print(Panel(chunk["content"], title=header, expand=False))
+        for index, chunk in enumerate(chunks):
+            if index:
+                console.print("-----------------------------", markup=False, highlight=False)
+            console.print(chunk["content"], markup=False, highlight=False)
 
     try:
         response = requests.get(

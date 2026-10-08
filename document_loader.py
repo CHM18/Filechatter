@@ -16,6 +16,7 @@ embedded pictures inside .docx/.pptx/.xlsx are OCR'd inline as well.
 from __future__ import annotations
 
 import base64
+import hashlib
 import html as html_module
 import importlib.util
 import io
@@ -48,6 +49,9 @@ def _has_module(module_name: str) -> bool:
 _MIN_TEXT_LAYER_CHARS = 20  # below this, a PDF page/document is treated as "scanned"
 _MAX_OCR_IMAGE_DIMENSION_PX = 3500  # cap OCR input size: bounds runtime/memory on huge scans
 _OSD_PROBE_MAX_DIMENSION_PX = 1000  # orientation detection runs on a small downscaled probe
+_MIN_EMBEDDED_OCR_IMAGE_DIMENSION_PX = 80
+_MIN_OCR_WORD_CONFIDENCE = 50.0
+_MIN_SINGLE_WORD_OCR_CONFIDENCE = 70.0
 
 
 def _has_tesseract_binary() -> bool:
@@ -104,7 +108,42 @@ def _ocr_pil_image(image) -> str:
         )
     pytesseract = _configured_tesseract()
     image = _correct_orientation(pytesseract, image)
-    return pytesseract.image_to_string(image, lang=config.OCR_LANGUAGE).strip()
+    from PIL import ImageOps
+
+    image = ImageOps.autocontrast(image.convert("L"))
+    if max(image.size) < 1200:
+        scale = min(2.0, 1600 / max(image.size))
+        image = image.resize((int(image.width * scale), int(image.height * scale)))
+
+    data = pytesseract.image_to_data(
+        image,
+        lang=config.OCR_LANGUAGE,
+        output_type=pytesseract.Output.DICT,
+    )
+    lines: dict[tuple[str, str, str], list[str]] = {}
+    accepted_confidences: list[float] = []
+    for index, text in enumerate(data.get("text", [])):
+        word = text.strip()
+        if not word:
+            continue
+        try:
+            confidence = float(data["conf"][index])
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        if confidence < _MIN_OCR_WORD_CONFIDENCE:
+            continue
+        line_key = tuple(
+            str(data.get(key, ["0"] * len(data["text"]))[index])
+            for key in ("block_num", "par_num", "line_num")
+        )
+        lines.setdefault(line_key, []).append(word)
+        accepted_confidences.append(confidence)
+
+    if not accepted_confidences:
+        return ""
+    if len(accepted_confidences) == 1 and accepted_confidences[0] < _MIN_SINGLE_WORD_OCR_CONFIDENCE:
+        return ""
+    return "\n".join(" ".join(words) for words in lines.values())
 
 
 def _ocr_image_bytes(data: bytes) -> str:
@@ -171,6 +210,7 @@ def _read_pdf_with_ocr(path: Path, text_pages: list[str]) -> tuple[str, dict[str
     parts: list[str] = []
     ocr_pages = 0
     ocr_image_count = 0
+    seen_image_hashes: set[str] = set()
     document = fitz.open(str(path))
     try:
         for index, page in enumerate(document):
@@ -199,8 +239,14 @@ def _read_pdf_with_ocr(path: Path, text_pages: list[str]) -> tuple[str, dict[str
             page_parts = [existing_text]
             for image_info in page.get_images(full=True):
                 xref = image_info[0]
+                if max(image_info[2], image_info[3]) < _MIN_EMBEDDED_OCR_IMAGE_DIMENSION_PX:
+                    continue
                 try:
                     image_bytes = document.extract_image(xref)["image"]
+                    image_hash = hashlib.sha256(image_bytes).hexdigest()
+                    if image_hash in seen_image_hashes:
+                        continue
+                    seen_image_hashes.add(image_hash)
                     ocr_text = _ocr_image_bytes(image_bytes)
                 except Exception as exc:
                     logger.warning("Embedded-image OCR failed on %s page %d: %s", path, index + 1, exc)

@@ -294,7 +294,7 @@ python -m cli list-docs
 python -m cli dump-chunks "your-file.docx" --limit 3
 ```
 
-This prints the actual chunk text stored in the RAG index, which is useful when a document was uploaded but retrieval or summarization looks wrong.
+This prints the actual chunk text stored in the RAG index, which is useful when a document was uploaded but retrieval or summarization looks wrong. You can pass a file name (matched case-insensitively across collections) or the exact indexed source path. If multiple documents share a file name, use the full source path from `list-docs` to select one document.
 
 #### Clear all documents:
 ```bash

@@ -197,6 +197,50 @@ class TestOCR:
         monkeypatch.setattr(dl, "_has_tesseract_binary", lambda: False)
         assert dl.is_ocr_available() is False
 
+    def test_ocr_keeps_confident_words_and_drops_weak_words(self, monkeypatch):
+        from PIL import Image
+
+        class FakePytesseract:
+            class Output:
+                DICT = "dict"
+
+            @staticmethod
+            def image_to_data(_image, *, lang, output_type):
+                assert lang == dl.config.OCR_LANGUAGE
+                assert output_type == "dict"
+                return {
+                    "text": ["Service", "gibberish"],
+                    "conf": ["94", "18"],
+                    "block_num": ["1", "1"],
+                    "par_num": ["1", "1"],
+                    "line_num": ["1", "1"],
+                }
+
+        monkeypatch.setattr(dl, "is_ocr_available", lambda: True)
+        monkeypatch.setattr(dl, "_configured_tesseract", lambda: FakePytesseract)
+        monkeypatch.setattr(dl, "_correct_orientation", lambda _pytesseract, image: image)
+
+        result = dl._ocr_pil_image(Image.new("RGB", (100, 60), color="white"))
+
+        assert result == "Service"
+
+    def test_ocr_rejects_low_confidence_single_word(self, monkeypatch):
+        from PIL import Image
+
+        class FakePytesseract:
+            class Output:
+                DICT = "dict"
+
+            @staticmethod
+            def image_to_data(_image, **_kwargs):
+                return {"text": ["noise"], "conf": ["62"]}
+
+        monkeypatch.setattr(dl, "is_ocr_available", lambda: True)
+        monkeypatch.setattr(dl, "_configured_tesseract", lambda: FakePytesseract)
+        monkeypatch.setattr(dl, "_correct_orientation", lambda _pytesseract, image: image)
+
+        assert dl._ocr_pil_image(Image.new("RGB", (100, 60), color="white")) == ""
+
     def test_image_ocr_enabled_uses_ocr_instead_of_vision(self, tmp_path, monkeypatch):
         path = tmp_path / "bill.png"
         path.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -324,7 +368,7 @@ class TestOCR:
             page = document.new_page()
             page.insert_text((72, 72), "Real text layer on top of a background photo.")
             buffer = io.BytesIO()
-            Image.new("RGB", (20, 20), color="white").save(buffer, format="PNG")
+            Image.new("RGB", (120, 120), color="white").save(buffer, format="PNG")
             page.insert_image(fitz.Rect(72, 200, 172, 300), stream=buffer.getvalue())
             document.save(str(path))
         finally:
@@ -340,6 +384,41 @@ class TestOCR:
         assert loaded.metadata["extraction_method"] == "mixed"
         assert loaded.metadata["ocr_image_count"] == 1
         assert loaded.metadata["ocr_pages"] == 0
+
+    def test_pdf_skips_tiny_and_duplicate_embedded_images(self, tmp_path, monkeypatch):
+        import fitz
+        import io
+        from PIL import Image
+
+        path = tmp_path / "duplicate-images.pdf"
+        document = fitz.open()
+        try:
+            page = document.new_page()
+            page.insert_text((72, 72), "A usable text layer is present on this page.")
+            image_buffers = []
+            for size in ((120, 120), (20, 20)):
+                buffer = io.BytesIO()
+                Image.new("RGB", size, color="white").save(buffer, format="PNG")
+                image_buffers.append(buffer.getvalue())
+            page.insert_image(fitz.Rect(72, 150, 172, 250), stream=image_buffers[0])
+            page.insert_image(fitz.Rect(200, 150, 300, 250), stream=image_buffers[0])
+            page.insert_image(fitz.Rect(320, 150, 340, 170), stream=image_buffers[1])
+            document.save(str(path))
+        finally:
+            document.close()
+
+        ocr_calls: list[bytes] = []
+        monkeypatch.setattr(dl, "is_ocr_available", lambda: True)
+        monkeypatch.setattr(
+            dl,
+            "_ocr_image_bytes",
+            lambda data: ocr_calls.append(data) or "Detected label",
+        )
+
+        loaded = dl.load_document(path, ocr_enabled=True)
+
+        assert len(ocr_calls) == 1
+        assert loaded.metadata["ocr_image_count"] == 1
 
     def test_ocr_disabled_never_touches_ocr_path(self, tmp_path, monkeypatch):
         path = tmp_path / "scan.pdf"

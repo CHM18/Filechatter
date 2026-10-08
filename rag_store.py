@@ -769,8 +769,15 @@ class RagStore:
             params: list[Any] = []
 
             if source:
-                query += " WHERE source = ?"
-                params.append(source)
+                if "/" in source or "\\" in source:
+                    query += " WHERE source = ?"
+                    params.append(source)
+                else:
+                    query += (
+                        " WHERE source = ? OR source IN "
+                        "(SELECT source FROM documents WHERE source_name = ? COLLATE NOCASE)"
+                    )
+                    params.extend([source, source])
 
             query += " ORDER BY source ASC, chunk_index ASC LIMIT ? OFFSET ?"
             params.extend([limit, offset])

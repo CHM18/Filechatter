@@ -47,6 +47,148 @@ class TestFileTypesApi:
         assert {".pdf", ".xlsx", ".pptx"}.issubset(exts)
 
 
+class TestChunkInspection:
+    def test_filename_lookup_and_exact_path_lookup(self, client):
+        source = r"C:\docs\Snke Operating system 2-3 - Software User Guide.pdf"
+        other_source = r"C:\other\Snke Operating system 2-3 - Software User Guide.pdf"
+        filename = "Snke Operating system 2-3 - Software User Guide.pdf"
+        response = client.post(
+            "/upload",
+            json={
+                "documents": ["First guide content.", "Second guide content."],
+                "metadata": [
+                    {"source": source, "filename": filename},
+                    {"source": other_source, "filename": filename},
+                ],
+                "collection_name": "guides",
+            },
+        )
+        assert response.status_code == 200
+
+        chunks = client.get("/chunks", params={"source": filename.lower()}).json()["chunks"]
+        assert {chunk["source"] for chunk in chunks} == {source, other_source}
+
+        chunks = client.get("/chunks", params={"source": source}).json()["chunks"]
+        assert [chunk["source"] for chunk in chunks] == [source]
+
+    def test_cli_prints_chunks_for_filename(self, client, monkeypatch):
+        from typer.testing import CliRunner
+
+        import cli
+
+        filename = "Snke Operating system 2-3 - Software User Guide.pdf"
+        client.post(
+            "/upload",
+            json={
+                "documents": ["First stored chunk.", "Second stored chunk."],
+                "metadata": [
+                    {"source": f"C:/docs/{filename}", "filename": filename},
+                    {"source": f"C:/docs/{filename}", "filename": filename},
+                ],
+                "collection_name": "guides",
+            },
+        )
+        monkeypatch.setattr(
+            cli.requests, "get", lambda url, params, timeout: client.get("/chunks", params=params)
+        )
+
+        result = CliRunner().invoke(cli.app, ["dump-chunks", filename, "--limit", "3"])
+
+        assert result.exit_code == 0
+        assert result.output.strip() == (
+            "First stored chunk.\n-----------------------------\nSecond stored chunk."
+        )
+        assert "chunk 0" not in result.output
+        assert "╭" not in result.output
+        assert "Error:" not in result.output
+
+    def test_cli_empty_result_is_success(self, client, monkeypatch):
+        from typer.testing import CliRunner
+
+        import cli
+
+        monkeypatch.setattr(
+            cli.requests, "get", lambda url, params, timeout: client.get("/chunks", params=params)
+        )
+
+        result = CliRunner().invoke(cli.app, ["dump-chunks", "missing.pdf"])
+
+        assert result.exit_code == 0
+        assert "No chunks found" in result.output
+        assert "Error:" not in result.output
+
+    def test_cli_synchronizes_windows_console_before_using_utf8(self, monkeypatch):
+        import sys
+        from types import SimpleNamespace
+
+        import cli
+
+        calls = []
+        stream = SimpleNamespace(
+            isatty=lambda: True,
+            reconfigure=lambda **kwargs: calls.append(kwargs),
+        )
+        fake_ctypes = SimpleNamespace(
+            windll=SimpleNamespace(
+                kernel32=SimpleNamespace(SetConsoleOutputCP=lambda code: calls.append(code))
+            )
+        )
+        with monkeypatch.context() as context:
+            context.setattr(sys, "platform", "win32")
+            context.setattr(sys, "stdout", stream)
+            context.setattr(sys, "stderr", stream)
+            context.setitem(sys.modules, "ctypes", fake_ctypes)
+            cli.configure_output()
+
+        assert calls == [
+            65001,
+            {"encoding": "utf-8", "errors": "backslashreplace"},
+            {"encoding": "utf-8", "errors": "backslashreplace"},
+        ]
+
+    def test_cli_preserves_unicode_with_legacy_output_encoding(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        import cli
+
+        script = r'''
+import sys
+from types import SimpleNamespace
+import cli
+
+sys.stdout.reconfigure(encoding="cp1252", errors="strict")
+sys.stderr.reconfigure(encoding="cp1252", errors="strict")
+text = "\u2022 \u25b3! Warning: Warnings are indicated by triangular warning symbols."
+chunk = {
+    "source": "warning.pdf",
+    "chunk_index": 0,
+    "start_char": 0,
+    "end_char": len(text),
+    "content": text,
+}
+cli.requests.get = lambda *args, **kwargs: SimpleNamespace(
+    status_code=200,
+    raise_for_status=lambda: None,
+    json=lambda: {"chunks": [chunk]},
+)
+cli.app(["dump-chunks", "warning.pdf", "--limit", "3"])
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(cli.__file__).parent,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "\u2022 \u25b3! Warning:" in result.stdout
+        assert "triangular warning symbols." in result.stdout
+        assert "Error:" not in result.stdout
+
+
 class TestChunkExportApi:
     def test_export_downloads_all_source_chunks_as_markdown(self, client, monkeypatch):
         import rag_server

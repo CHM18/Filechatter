@@ -104,7 +104,7 @@ if errorlevel 1 (
 
 echo.
 echo [INFO] Starting rag_server.py ...
-python "%SERVER_FILE%"
+"%VENV_PY%" "%SERVER_FILE%"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.
