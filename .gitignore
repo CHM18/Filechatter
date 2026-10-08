@@ -5,6 +5,7 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+.mcp.json
 
 # Virtual environments
 venv/

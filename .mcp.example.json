@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "filechatter": {
+      "command": "C:\\Filechatter\\.venv_filechatter\\Scripts\\python.exe",
+      "args": ["C:\\Filechatter\\.venv_filechatter\\Scripts\\rag_mcp_server.py"]
+    }
+  }
+}
