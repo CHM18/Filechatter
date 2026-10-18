@@ -16,9 +16,10 @@ RUN ARCH=$(uname -m) && \
         aarch64|arm64) ARCH="arm64" ;; \
         *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
     esac && \
-    curl -fsSL "https://ollama.com/download/ollama-linux-${ARCH}.tar.zst" \
-        | tar --zstd -x -C /usr && \
-    rm -rf /var/lib/apt/lists/*
+    curl -fL --retry 10 --retry-all-errors --retry-delay 5 -C - \
+        -o /tmp/ollama.tar.zst "https://ollama.com/download/ollama-linux-${ARCH}.tar.zst" && \
+    tar --zstd -xf /tmp/ollama.tar.zst -C /usr && \
+    rm -f /tmp/ollama.tar.zst
 
 # Create default models directory
 RUN mkdir -p /root/.ollama
