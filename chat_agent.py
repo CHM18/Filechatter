@@ -151,7 +151,9 @@ def _system_prompt(
         f"Databases available for writing:\n{describe(write_cols)}\n\n"
         "When a write is requested and several write databases are available, choose the one "
         "whose description and accepted file types best match the content; if none clearly "
-        "fits, ask the user."
+        "fits, ask the user.\n\n"
+        "Photo keywords (date, season, place, camera direction, ...) are indexed in both English "
+        "and German, so search in the language of the user's question."
         f"{memory_context}"
     )
 

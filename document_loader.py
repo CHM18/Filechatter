@@ -34,7 +34,7 @@ from typing import Any
 import requests
 
 import config
-
+from exif_keywords import capture_datetime, derive_exif_keywords
 logger = logging.getLogger(__name__)
 
 
@@ -491,6 +491,60 @@ def _image_bytes_for_vision(path: Path) -> tuple[bytes, str]:
             return output.getvalue(), mime
 
 
+_EXIF_ENUMS: dict[str, dict[int, str]] = {
+    "ExposureProgram": {
+        0: "not defined", 1: "manual", 2: "normal program", 3: "aperture priority",
+        4: "shutter priority", 5: "creative program", 6: "action program",
+        7: "portrait mode", 8: "landscape mode",
+    },
+    "ExposureMode": {0: "auto exposure", 1: "manual exposure", 2: "auto bracket"},
+    "SceneCaptureType": {0: "standard", 1: "landscape", 2: "portrait", 3: "night scene"},
+    "SubjectDistanceRange": {0: "unknown", 1: "macro", 2: "close view", 3: "distant view"},
+}
+
+
+def _exif_scalar(value: Any) -> Any:
+    """Convert Pillow EXIF values (rationals, bytes, tuples) into plain JSON-friendly values."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore").replace("\x00", "").strip()
+    if isinstance(value, str):
+        return value.replace("\x00", "").strip()
+    if isinstance(value, (list, tuple)):
+        return [_exif_scalar(item) for item in value]
+    if isinstance(value, (int, bool)):
+        return value
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value).strip()
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return round(number, 6)
+
+
+def _format_exif_value(name: str, value: Any) -> Any:
+    value = _exif_scalar(value)
+    if value in (None, "", [], ()):
+        return None
+    if name == "ISOSpeedRatings" and isinstance(value, list):
+        value = value[0] if value else None
+    if name == "Flash" and isinstance(value, int):
+        return "flash fired" if value & 1 else "no flash"
+    if name in _EXIF_ENUMS and isinstance(value, int):
+        return _EXIF_ENUMS[name].get(value)
+    if name == "ExposureTime" and isinstance(value, float) and value > 0:
+        return f"1/{round(1 / value)}" if value < 0.5 else f"{value:g}"
+    if name in {"GPS:GPSLatitude", "GPS:GPSLongitude"} and isinstance(value, list) and len(value) == 3:
+        try:
+            degrees, minutes, seconds = (float(part) for part in value)
+        except (TypeError, ValueError):
+            return None
+        return round(degrees + minutes / 60 + seconds / 3600, 6)
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    return value
+
+
 def _extract_image_exif(path: Path) -> dict[str, Any]:
     try:
         from PIL import ExifTags, Image
@@ -501,12 +555,32 @@ def _extract_image_exif(path: Path) -> dict[str, Any]:
         raw_exif = image.getexif()
         if not raw_exif:
             return {}
-        name_by_id = ExifTags.TAGS
+
+        # Most tags live in sub-IFDs, not in the base IFD0 directory.
+        sources: list[tuple[str, dict[int, Any], dict[int, str]]] = [
+            ("", dict(raw_exif), ExifTags.TAGS),
+        ]
+        for prefix, ifd, tag_names in (
+            ("", ExifTags.IFD.Exif, ExifTags.TAGS),
+            ("GPS:", ExifTags.IFD.GPSInfo, ExifTags.GPSTAGS),
+        ):
+            try:
+                sub_ifd = dict(raw_exif.get_ifd(ifd))
+            except Exception:
+                sub_ifd = {}
+            if sub_ifd:
+                sources.append((prefix, sub_ifd, tag_names))
+
+        wanted = set(config.IMAGE_EXIF_FIELDS)
         normalized: dict[str, Any] = {}
-        for key, value in raw_exif.items():
-            tag_name = name_by_id.get(key, str(key))
-            if tag_name in config.IMAGE_EXIF_FIELDS and value not in (None, "", (), [], {}):
-                normalized[tag_name] = str(value)
+        for prefix, entries, tag_names in sources:
+            for key, raw_value in entries.items():
+                name = f"{prefix}{tag_names.get(key, key)}"
+                if name not in wanted or name in normalized:
+                    continue
+                value = _format_exif_value(name, raw_value)
+                if value is not None:
+                    normalized[name] = value
         return normalized
 
 
@@ -605,6 +679,12 @@ def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
     analysis = _summarize_image_with_llm(path)
     summary, keywords = _parse_image_analysis(analysis)
     exif = _extract_image_exif(path)
+    exif_keywords: list[str] = []
+    capture_time = None
+    if config.IMAGE_EXIF_DERIVE_KEYWORDS and exif:
+        exif_keywords = derive_exif_keywords(exif)
+        moment = capture_datetime(exif)
+        capture_time = moment.isoformat() if moment else None
 
     lines = [
         f"Image file: {path.name}",
@@ -615,11 +695,13 @@ def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
     ]
     if keywords:
         lines.append(f"Searchable keywords: {', '.join(keywords)}")
+    if exif_keywords:
+        lines.append(f"Photo keywords: {', '.join(exif_keywords)}")
     if exif:
         lines.append("EXIF metadata:")
         for key in config.IMAGE_EXIF_FIELDS:
             value = exif.get(key)
-            if value:
+            if value not in (None, ""):
                 lines.append(f"- {key}: {value}")
 
     metadata = {
@@ -627,6 +709,8 @@ def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
         "image_summary": summary,
         "image_keywords": keywords,
         "image_exif": exif,
+        "image_exif_keywords": exif_keywords,
+        "image_capture_time": capture_time,
         "image_vision_model": config.IMAGE_VISION_MODEL,
     }
     return "\n".join(lines).strip(), metadata

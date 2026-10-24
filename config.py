@@ -53,9 +53,18 @@ IMAGE_VISION_MAX_TOKENS = int(os.getenv("IMAGE_VISION_MAX_TOKENS", "1500"))
 IMAGE_EXIF_FIELDS = _csv_list(
     os.getenv(
         "IMAGE_EXIF_FIELDS",
-        "DateTimeOriginal,Make,Model,LensModel,FNumber,ExposureTime,ISOSpeedRatings,FocalLength,GPSInfo",
+        "ExifImageHeight,ExifImageWidth,Orientation,Make,Model,LensMake,LensModel,FNumber,Flash,"
+        "ExposureTime,ISOSpeedRatings,FocalLength,FocalLengthIn35mmFilm,ExposureMode,ExposureProgram,"
+        "SceneCaptureType,SubjectDistance,SubjectDistanceRange,ImageDescription,Software,"
+        "DateTimeOriginal,OffsetTimeOriginal,SubsecTimeOriginal",
     )
 )
+# Derive searchable keywords (format, date, season, direction, camera, ...) from EXIF
+IMAGE_EXIF_DERIVE_KEYWORDS = os.getenv("IMAGE_EXIF_DERIVE_KEYWORDS", "true").strip().lower() not in {"0", "false", "no", "off"}
+# Languages of derived photo keywords (supported: en, de)
+IMAGE_KEYWORD_LANGUAGES = [lang.lower() for lang in _csv_list(os.getenv("IMAGE_KEYWORD_LANGUAGES", "en,de"))]
+# Offline reverse geocoding of GPS coordinates into place keywords (needs 'reverse_geocoder')
+IMAGE_EXIF_GEOCODE = os.getenv("IMAGE_EXIF_GEOCODE", "true").strip().lower() not in {"0", "false", "no", "off"}
 
 # OCR (Tesseract via pytesseract) - opt-in per collection, see collections_manager.ocr_enabled.
 # The Tesseract binary is a manual system install (not pip-installable); see README.

@@ -148,6 +148,44 @@ class TestSupportAndCatalog:
             assert corrected.getexif().get(274) in (None, 1)
         assert path.read_bytes() == original
 
+    def test_extract_exif_reads_sub_ifds_and_normalizes_values(self, tmp_path, monkeypatch):
+        from PIL import ExifTags, Image
+
+        path = tmp_path / "photo.jpg"
+        exif = Image.Exif()
+        exif[271] = "Canon"
+        exif[274] = 6
+        exif.get_ifd(ExifTags.IFD.Exif).update(
+            {33434: 0.004, 33437: 2.8, 37385: 25, 34850: 3, 34855: 400, 36867: "2020:06:01 12:00:00"}
+        )
+        exif.get_ifd(ExifTags.IFD.GPSInfo).update(
+            {1: "N", 2: (47.0, 30.0, 0.0), 3: "E", 4: (8.0, 15.0, 36.0)}
+        )
+        Image.new("RGB", (4, 2)).save(path, exif=exif)
+        monkeypatch.setattr(
+            dl.config,
+            "IMAGE_EXIF_FIELDS",
+            ["Make", "Orientation", "ExposureTime", "FNumber", "Flash", "ExposureProgram",
+             "ISOSpeedRatings", "DateTimeOriginal", "GPS:GPSLatitude", "GPS:GPSLatitudeRef",
+             "GPS:GPSLongitude", "Software"],
+        )
+
+        result = dl._extract_image_exif(path)
+
+        assert result == {
+            "Make": "Canon",
+            "Orientation": 6,
+            "ExposureTime": "1/250",
+            "FNumber": 2.8,
+            "Flash": "flash fired",
+            "ExposureProgram": "aperture priority",
+            "ISOSpeedRatings": 400,
+            "DateTimeOriginal": "2020:06:01 12:00:00",
+            "GPS:GPSLatitude": 47.5,
+            "GPS:GPSLatitudeRef": "N",
+            "GPS:GPSLongitude": 8.26,
+        }
+
     @pytest.mark.parametrize("orientation", [None, 1])
     def test_vision_does_not_rotate_image_without_needed_correction(self, tmp_path, monkeypatch, orientation):
         import base64
