@@ -71,6 +71,7 @@ const app = {
         ["LLM endpoint", settings.llm.base_url],
         ["Model", settings.llm.model],
         ["Temperature", settings.llm.temperature],
+        ["Reproducible answers", settings.llm.reproducible ? `on (seed ${settings.llm.seed})` : "off"],
         ["Read tools", settings.permissions.groups.read_tools || settings.permissions.groups.read],
         ["Ingest tools", settings.permissions.groups.ingest_tools || settings.permissions.groups.write],
         ["Collection administration", settings.permissions.groups.collection_tools || settings.permissions.groups.write],

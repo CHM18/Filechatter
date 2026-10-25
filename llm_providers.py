@@ -64,12 +64,16 @@ class OpenAICompatProvider:
         api_key: str | None = None,
         temperature: float = 0.7,
         timeout: int = 120,
+        reproducible: bool = False,
+        seed: int = 42,
     ) -> None:
         self.base_url = _normalize_base_url(base_url)
         self.model = model
         self.api_key = api_key
         self.temperature = temperature
         self.timeout = timeout
+        self.reproducible = reproducible
+        self.seed = seed
 
     def _require_base_url(self) -> str:
         if not self.base_url:
@@ -122,10 +126,12 @@ class OpenAICompatProvider:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.temperature,
+            "temperature": 0 if self.reproducible else self.temperature,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if self.reproducible:
+            payload["seed"] = int(self.seed)
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -263,4 +269,6 @@ def build_provider(llm_settings: dict[str, Any]) -> OpenAICompatProvider:
         api_key=llm_settings.get("api_key") or None,
         temperature=float(llm_settings.get("temperature", 0.7)),
         timeout=int(llm_settings.get("timeout_seconds", 120)),
+        reproducible=bool(llm_settings.get("reproducible", False)),
+        seed=int(llm_settings.get("seed", 42)),
     )

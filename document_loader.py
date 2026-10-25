@@ -639,6 +639,19 @@ def _build_vision_prompt(path: Path, context: str = "") -> str:
     return prompt
 
 
+def _vision_sampling() -> dict[str, Any]:
+    """Follow the 'Reproducible answers' switch of the chat endpoint (temperature 0 + fixed seed)."""
+    try:
+        import runtime  # lazy: runtime imports ingest_jobs, which imports this module
+
+        llm = runtime.settings().get()["llm"]
+    except Exception:
+        return {"temperature": 0.2}
+    if llm.get("reproducible"):
+        return {"temperature": 0, "seed": int(llm.get("seed", 42))}
+    return {"temperature": 0.2}
+
+
 def _summarize_image_with_llm(path: Path, context: str = "") -> str:
     base_url = _normalize_base_url(config.IMAGE_VISION_BASE_URL)
     if not base_url:
@@ -673,7 +686,7 @@ def _summarize_image_with_llm(path: Path, context: str = "") -> str:
             }
         ],
         "max_tokens": int(config.IMAGE_VISION_MAX_TOKENS),
-        "temperature": 0.2,
+        **_vision_sampling(),
     }
 
     try:

@@ -64,6 +64,12 @@ MCP hosts, and the web UI is their administration console.
 Configure the endpoint in the Chat sidebar (provider, base URL, model) and press
 **Reload models** (⟳). Then:
 
+- **Reproducible answers** - the checkbox in the Endpoint tile sends `temperature: 0` and a fixed
+  `seed` (`llm.seed`, default 42) to the endpoint, for LM Studio, Ollama and OpenAI-compatible
+  servers alike. It also applies to photo analysis during ingestion. It is best effort: identical
+  output needs the same model, server version, hardware and context size (`num_ctx` cannot be set
+  through this API; set it in the Ollama Modelfile or LM Studio's context length). Greedy decoding can
+  loop on some models; switch it off for those.
 - **Read from / Write to** - database access is controlled centrally in the Databases tab. The
   model selects from the authorized collection choices exposed by each tool, and the backend
   filters every request against those access flags.
@@ -413,11 +419,11 @@ The server can be configured using environment variables. Copy `.env.example` to
 - `IMAGE_VISION_MODEL`: Model used to summarize images (default: `LM_STUDIO_MODEL`)
 - `IMAGE_VISION_API_KEY`: Optional API key for the vision endpoint
 - `IMAGE_VISION_TIMEOUT`: Timeout for image-analysis requests in seconds
-- `IMAGE_VISION_MAX_TOKENS`: Maximum output tokens for the image response (headline, description, keywords; 600 recommended)
-- `IMAGE_VISION_MAX_SIDE`: Longest image side in pixels sent to the vision model (default: `1280`, `0` = original). Images are rotated per EXIF orientation first; TIFF/BMP/GIF are sent as PNG
+- `IMAGE_VISION_MAX_TOKENS`: Maximum output tokens for the image response (headline, description, keywords; 600 recommended). "Thinking" models (e.g. Qwen3.x) spend this budget on reasoning and then return an empty answer; use about 4000 for them or turn thinking off in LM Studio
+- `IMAGE_VISION_MAX_SIDE`: Longest image side in pixels sent to the vision model (default: `1280`, `0` = original). Images are rotated per EXIF orientation first; TIFF/BMP/GIF/HEIC are sent as PNG. HEIC/HEIF need `pillow-heif` (in `requirements.txt`)
 - `IMAGE_VISION_LANGUAGE`: Language of the generated headline and description (default: `German`); keywords are requested in German and English
 - `IMAGE_VISION_CONTEXT`: Give the model capture date, place (XMP or offline geocoder) and folder name as unverified context (default: `true`); it is instructed to describe only what is visible
-- `IMAGE_SKIP_ANALYZED`: When re-scanning, skip unchanged images that were analysed with the same model, prompt and relevant settings (default: `true`). A changed model, language or EXIF/XMP setting re-analyses the image and replaces its entry; the fingerprint is stored as `image_analysis_fingerprint`. Set `false` to force re-analysis
+- `IMAGE_SKIP_ANALYZED`: When re-scanning, skip unchanged images that were analysed with the same model, prompt and relevant settings (default: `true`). A changed model, language or EXIF/XMP setting re-analyses the image and replaces its entry; the fingerprint is stored as `image_analysis_fingerprint`, the model's headline as `image_headline`, and skipped photos are counted as `skipped_unchanged` in the job status. Set `false` to force re-analysis
 - `IMAGE_EXIF_FIELDS`: Comma-separated EXIF tags to persist when present (GPS tags use the `GPS:` prefix, e.g. `GPS:GPSLatitude`). Tags are read from the base, Exif and GPS directories; values are normalized (rationals to numbers, GPS coordinates to decimal degrees, `Flash`/`ExposureProgram`/`ExposureMode`/`SceneCaptureType`/`SubjectDistanceRange` to words, `ExposureTime` as `1/250`). The defaults exclude privacy-relevant tags (`GPS:*`, `Artist`); add them in your own `.env`
 - `IMAGE_EXIF_DERIVE_KEYWORDS`: Derive extra keywords from the stored EXIF values (default: `true`): portrait/landscape format, year, month, season (hemisphere-aware), weekday, time of day, camera facing direction, edited-with/scanned (from `Software`), camera/lens, wide angle/telephoto, low light, long exposure, etc. They are added to the indexed text as `Photo keywords:` and stored as `image_exif_keywords`; the capture time incl. `SubsecTimeOriginal` is stored as `image_capture_time` for ordering burst images. Only tags listed in `IMAGE_EXIF_FIELDS` can contribute
 - `IMAGE_KEYWORD_LANGUAGES`: Languages of the derived photo keywords, comma-separated, `en` and/or `de` (default: `en,de`). With both, every derived keyword is indexed in English and German (e.g. `summer, Sommer`), so keyword matches work for questions in either language. Raw EXIF values and place names are never translated
@@ -461,7 +467,8 @@ Filechatter/
 ├── langchain_support.py    # Prompt template, output parsing, LM Studio client
 ├── cli.py                  # CLI for upload, status, and diagnostics
 ├── static/                 # Web UI (vanilla JS, no build step)
-├── tests/                  # pytest suite (isolated temp data dir, fake embedder)
+├── tests/                  # pytest suite (isolated temp data dir, fake embedder); manual_*.py are
+│                           # preview scripts (EXIF keywords, XMP/IPTC check, vision report)
 ├── requirements.txt        # Python dependencies
 ├── requirements-dev.txt    # Test dependencies (pytest, httpx)
 └── README.md               # This file

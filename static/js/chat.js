@@ -39,6 +39,7 @@ const chatPanel = {
     });
     document.getElementById("chat-base-url").addEventListener("change", () => this.loadModels(true));
     document.getElementById("chat-model").addEventListener("change", () => this.saveEndpoint());
+    document.getElementById("chat-reproducible").addEventListener("change", () => this.saveEndpoint());
     document.getElementById("chat-refresh-models").addEventListener("click", () => this.loadModels(true));
     document.getElementById("chat-reset").addEventListener("click", () => this.resetConversation());
     document.getElementById("chat-stop").addEventListener("click", () => this.stopCurrentResponse());
@@ -64,6 +65,7 @@ const chatPanel = {
     const llm = this.settings.llm;
     document.getElementById("chat-provider").value = llm.provider in PROVIDER_DEFAULTS ? llm.provider : "openai_compat";
     document.getElementById("chat-base-url").value = llm.base_url || "";
+    document.getElementById("chat-reproducible").checked = !!llm.reproducible;
     this.renderModelOptions(llm.model);
   },
 
@@ -112,6 +114,7 @@ const chatPanel = {
         provider,
         base_url: baseUrl,
         model: document.getElementById("chat-model").value,
+        reproducible: document.getElementById("chat-reproducible").checked,
       },
     };
     try {

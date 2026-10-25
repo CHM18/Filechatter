@@ -86,6 +86,57 @@ def test_prompt_includes_context_only_when_enabled(tmp_path, monkeypatch):
     assert "Wien" not in dl._build_vision_prompt(path, "Place: Wien")
 
 
+def _fake_vision_post(monkeypatch, message, finish_reason="stop"):
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": message, "finish_reason": finish_reason}]}
+
+    monkeypatch.setattr(dl.config, "IMAGE_VISION_BASE_URL", "http://localhost:1234")
+    monkeypatch.setattr(dl.config, "IMAGE_VISION_MODEL", "m")
+    monkeypatch.setattr(dl.requests, "post", lambda _u, **k: captured.update(k) or Response())
+    return captured
+
+
+def _small_image(tmp_path):
+    path = tmp_path / "a.png"
+    Image.new("RGB", (8, 8)).save(path)
+    return path
+
+
+@pytest.mark.parametrize("reproducible,expected", [(True, {"temperature": 0, "seed": 7}), (False, {"temperature": 0.2})])
+def test_vision_follows_reproducible_switch(tmp_path, monkeypatch, reproducible, expected):
+    import runtime
+
+    class Settings:
+        def get(self):
+            return {"llm": {"reproducible": reproducible, "seed": 7}}
+
+    monkeypatch.setattr(runtime, "settings", lambda: Settings())
+    captured = _fake_vision_post(monkeypatch, {"content": "ok"})
+
+    dl._summarize_image_with_llm(_small_image(tmp_path))
+
+    payload = captured["json"]
+    assert {k: payload[k] for k in expected} == expected
+    assert ("seed" in payload) == reproducible
+
+
+def test_thinking_model_out_of_tokens_gives_helpful_error(tmp_path, monkeypatch):
+    _fake_vision_post(monkeypatch, {"content": "", "reasoning_content": "hmm"}, finish_reason="length")
+    with pytest.raises(RuntimeError, match="IMAGE_VISION_MAX_TOKENS"):
+        dl._summarize_image_with_llm(_small_image(tmp_path))
+
+
+def test_think_blocks_are_stripped(tmp_path, monkeypatch):
+    _fake_vision_post(monkeypatch, {"content": "<think>reasoning</think>\nHeadline: Ein Hund"})
+    assert dl._summarize_image_with_llm(_small_image(tmp_path)) == "Headline: Ein Hund"
+
+
 def test_fingerprint_changes_with_model(monkeypatch):
     monkeypatch.setattr(dl.config, "IMAGE_VISION_MODEL", "a")
     first = dl.image_analysis_fingerprint()

@@ -1,8 +1,9 @@
 #!/bin/bash
 set -e
 
+OLLAMA_VERSION="v0.40.11"
 CONTAINER_NAME="ollama-container"
-IMAGE_NAME="ollama:latest"
+IMAGE_NAME="ollama:${OLLAMA_VERSION}"
 OLLAMA_DIR="${HOME}/ollama"
 MODEL_NAME="nemotron-3-nano:4b"
 
@@ -62,8 +63,8 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
 fi
 
 # ── Build the Docker image ───────────────────────────────────────
-echo "→ Building Docker image '${IMAGE_NAME}' ..."
-docker build -t "$IMAGE_NAME" "$(dirname "$0")"
+echo "→ Building Docker image '${IMAGE_NAME}' (Ollama ${OLLAMA_VERSION}) ..."
+docker build --build-arg "OLLAMA_VERSION=${OLLAMA_VERSION}" -t "$IMAGE_NAME" "$(dirname "$0")"
 
 # ── Install NVIDIA Container Toolkit if missing ───────────────────
 install_nvidia_container_toolkit() {

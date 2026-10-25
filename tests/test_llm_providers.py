@@ -39,6 +39,34 @@ def delta(**d):
     return {"choices": [{"delta": d}]}
 
 
+class TestReproducible:
+    def _payload(self, monkeypatch, **kwargs):
+        captured = {}
+
+        def fake_post(url, **k):
+            captured.update(k)
+            return FakeStreamResponse(200, ["data: [DONE]"])
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        list(OpenAICompatProvider("http://x", "m", temperature=0.7, **kwargs).stream([]))
+        return captured["json"]
+
+    def test_switch_on_sends_temperature_zero_and_seed(self, monkeypatch):
+        payload = self._payload(monkeypatch, reproducible=True, seed=7)
+        assert payload["temperature"] == 0
+        assert payload["seed"] == 7
+
+    def test_switch_off_keeps_temperature_and_omits_seed(self, monkeypatch):
+        payload = self._payload(monkeypatch)
+        assert payload["temperature"] == 0.7
+        assert "seed" not in payload
+
+    def test_build_provider_reads_settings(self):
+        provider = llm_providers.build_provider({"reproducible": True, "seed": 3})
+        assert provider.reproducible is True
+        assert provider.seed == 3
+
+
 class TestStreaming:
     def test_text_streaming(self, monkeypatch):
         lines = [

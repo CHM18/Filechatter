@@ -38,6 +38,8 @@ def default_settings() -> dict[str, Any]:
             "api_key": None,
             "temperature": config.TEMPERATURE,
             "timeout_seconds": config.LM_STUDIO_TIMEOUT,
+            "reproducible": False,
+            "seed": 42,
         },
         "permissions": {
             "mode": "simple",

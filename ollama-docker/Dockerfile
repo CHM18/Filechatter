@@ -1,5 +1,8 @@
 FROM ubuntu:22.04
 
+# Pinned Ollama release (reproducible results); override with --build-arg OLLAMA_VERSION=vX.Y.Z
+ARG OLLAMA_VERSION=v0.40.11
+
 # Avoid interactive prompts during build
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -17,7 +20,7 @@ RUN ARCH=$(uname -m) && \
         *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
     esac && \
     curl -fL --retry 10 --retry-all-errors --retry-delay 5 -C - \
-        -o /tmp/ollama.tar.zst "https://ollama.com/download/ollama-linux-${ARCH}.tar.zst" && \
+        -o /tmp/ollama.tar.zst "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-${ARCH}.tar.zst" && \
     tar --zstd -xf /tmp/ollama.tar.zst -C /usr && \
     rm -f /tmp/ollama.tar.zst
 
