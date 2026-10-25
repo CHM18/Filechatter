@@ -65,6 +65,10 @@ IMAGE_EXIF_DERIVE_KEYWORDS = os.getenv("IMAGE_EXIF_DERIVE_KEYWORDS", "true").str
 IMAGE_KEYWORD_LANGUAGES = [lang.lower() for lang in _csv_list(os.getenv("IMAGE_KEYWORD_LANGUAGES", "en,de"))]
 # Offline reverse geocoding of GPS coordinates into place keywords (needs 'reverse_geocoder')
 IMAGE_EXIF_GEOCODE = os.getenv("IMAGE_EXIF_GEOCODE", "true").strip().lower() not in {"0", "false", "no", "off"}
+# User-written XMP/IPTC fields to index: Title, Description, Keywords, People, City, Country, CreatorTool
+IMAGE_XMP_FIELDS = _csv_list(os.getenv("IMAGE_XMP_FIELDS", "Title,Description,Keywords,City,Country,CreatorTool"))
+# Exact (case-insensitive) title/description/keyword values to discard as junk, comma-separated
+IMAGE_METADATA_IGNORE_VALUES = _csv_list(os.getenv("IMAGE_METADATA_IGNORE_VALUES", ""))
 
 # OCR (Tesseract via pytesseract) - opt-in per collection, see collections_manager.ocr_enabled.
 # The Tesseract binary is a manual system install (not pip-installable); see README.

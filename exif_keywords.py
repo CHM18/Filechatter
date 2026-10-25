@@ -58,8 +58,8 @@ def _flatten(items: list[Any]) -> list[str]:
 _EDITING_SOFTWARE = [
     ("photoshop elements", "Adobe Photoshop Elements"),
     ("elements organizer", "Adobe Photoshop Elements"),
-    ("photoshop", "Adobe Photoshop"),
     ("lightroom", "Adobe Lightroom"),
+    ("photoshop", "Adobe Photoshop"),
     ("picasa", "Picasa"),
     ("windows photo gallery", "Windows Photo Gallery"),
     ("digital photo professional", "Canon Digital Photo Professional"),
@@ -186,15 +186,16 @@ def _date_keywords(exif: dict[str, Any], latitude: float | None) -> list[Any]:
     ]
 
 
-def _software_keywords(exif: dict[str, Any]) -> list[Any]:
-    software = str(exif.get("Software", "")).casefold()
-    if not software:
-        return []
-    if any(token in software for token in _SCAN_SOFTWARE):
-        return [_t("scanned", "gescannt")]
-    for token, label in _EDITING_SOFTWARE:
-        if token in software:
-            return [_t("edited", "bearbeitet"), _t(f"edited with {label}", f"bearbeitet mit {label}")]
+def _software_keywords(*software_values: Any) -> list[Any]:
+    for value in software_values:
+        software = str(value or "").casefold()
+        if not software:
+            continue
+        if any(token in software for token in _SCAN_SOFTWARE):
+            return [_t("scanned", "gescannt")]
+        for token, label in _EDITING_SOFTWARE:
+            if token in software:
+                return [_t("edited", "bearbeitet"), _t(f"edited with {label}", f"bearbeitet mit {label}")]
     return []
 
 
@@ -298,16 +299,18 @@ def locate(latitude: float, longitude: float) -> list[str]:
     return _flatten(keywords)
 
 
-def derive_exif_keywords(exif: dict[str, Any]) -> list[str]:
-    """Return de-duplicated keywords (in IMAGE_KEYWORD_LANGUAGES) derived from the EXIF values present."""
-    if not exif:
+def derive_exif_keywords(exif: dict[str, Any], creator_tool: str = "") -> list[str]:
+    """Return de-duplicated keywords (in IMAGE_KEYWORD_LANGUAGES) derived from the EXIF values present.
+
+    creator_tool is the optional XMP CreatorTool, checked like the EXIF Software tag."""
+    if not exif and not creator_tool:
         return []
     position = gps_position(exif)
     keywords: list[Any] = [
         *_format_hint(exif),
         *_date_keywords(exif, position[0] if position else None),
         *_direction(exif),
-        *_software_keywords(exif),
+        *_software_keywords(exif.get("Software"), creator_tool),
         *_equipment_keywords(exif),
         *_shooting_keywords(exif),
         *_altitude_keywords(exif),

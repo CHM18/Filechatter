@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Dump the EXIF values and derived keywords Filechatter would store for a photo folder.
+"""Dump the EXIF values and derived keywords Filechatter would store for a photo folder. Output is written to a CSV or Excel file.
 
 Uses the real extraction code and your .env (IMAGE_EXIF_FIELDS, IMAGE_EXIF_GEOCODE, ...).
 No vision model and no indexing is involved.
 
 Usage (from the project root):
+    python tests/manual_exif_keywords.py D:\\Fotos -o exif_keywords.xlsx
     python tests/manual_exif_keywords.py D:\\Fotos -o exif_keywords.csv
     python tests/manual_exif_keywords.py D:\\Fotos --no-recursive --delimiter ,
 """
@@ -25,6 +26,7 @@ from PIL import Image  # noqa: E402
 import config  # noqa: E402
 from document_loader import _extract_image_exif  # noqa: E402
 from exif_keywords import capture_datetime, derive_exif_keywords  # noqa: E402
+from xmp_iptc import deduplicate_against, extract_xmp_iptc  # noqa: E402
 
 Image.MAX_IMAGE_PIXELS = None
 warnings.simplefilter("ignore", Image.DecompressionBombWarning)
@@ -50,12 +52,13 @@ def csv_safe(value):
 
 def write_xlsx(path: str, columns: list[str], rows: list[dict]) -> None:
     from openpyxl import Workbook
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(columns)
     for row in rows:
-        sheet.append([str(row.get(column, "")) for column in columns])
+        sheet.append([ILLEGAL_CHARACTERS_RE.sub("", str(row.get(column, ""))) for column in columns])
     for line in sheet.iter_rows(min_row=2):
         for cell in line:
             cell.number_format = "@"
@@ -72,7 +75,8 @@ def main() -> int:
 
     pattern = "*" if args.no_recursive else "**/*"
     files = sorted(p for p in args.folder.glob(pattern) if p.is_file() and p.suffix.lower() in EXTENSIONS)
-    columns = ["file", "capture_time", "keywords", *config.IMAGE_EXIF_FIELDS]
+    columns = ["file", "capture_time", "keywords", "xmp_title", "xmp_description", "xmp_keywords", "xmp_people",
+               "xmp_place", "creator_tool", *config.IMAGE_EXIF_FIELDS]
 
     errors = 0
     rows: list[dict] = []
@@ -84,10 +88,18 @@ def main() -> int:
             print(f"ERROR {path}: {exc}", file=sys.stderr)
             continue
         moment = capture_datetime(exif)
+        user_meta = extract_xmp_iptc(path)
+        exif = deduplicate_against({k: user_meta.get(k, "") for k in ("title", "description")}, exif)
         rows.append({
             "file": str(path.relative_to(args.folder)),
             "capture_time": moment.isoformat() if moment else "",
-            "keywords": ", ".join(derive_exif_keywords(exif)),
+            "keywords": ", ".join(derive_exif_keywords(exif, user_meta.get("creator_tool", ""))),
+            "xmp_title": user_meta.get("title", ""),
+            "xmp_description": user_meta.get("description", ""),
+            "xmp_keywords": ", ".join(user_meta.get("keywords", [])),
+            "xmp_people": ", ".join(user_meta.get("people", [])),
+            "xmp_place": ", ".join(v for v in (user_meta.get("city"), user_meta.get("country")) if v),
+            "creator_tool": user_meta.get("creator_tool", ""),
             **{key: json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value
                for key, value in exif.items()},
         })

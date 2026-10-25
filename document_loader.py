@@ -35,6 +35,7 @@ import requests
 
 import config
 from exif_keywords import capture_datetime, derive_exif_keywords
+from xmp_iptc import dedupe_keywords, deduplicate_against, extract_xmp_iptc, normalize
 logger = logging.getLogger(__name__)
 
 
@@ -683,20 +684,41 @@ def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
     analysis = _summarize_image_with_llm(path)
     summary, keywords = _parse_image_analysis(analysis)
     exif = _extract_image_exif(path)
+    user_meta = extract_xmp_iptc(path)
+    exif = deduplicate_against(
+        {key: user_meta.get(key, "") for key in ("title", "description")}, exif
+    )
     exif_keywords: list[str] = []
     capture_time = None
-    if config.IMAGE_EXIF_DERIVE_KEYWORDS and exif:
-        exif_keywords = derive_exif_keywords(exif)
+    creator_tool = user_meta.get("creator_tool", "")
+    if config.IMAGE_EXIF_DERIVE_KEYWORDS and (exif or creator_tool):
+        exif_keywords = derive_exif_keywords(exif, creator_tool)
         moment = capture_datetime(exif)
         capture_time = moment.isoformat() if moment else None
+
+    place = [value for value in (user_meta.get("city"), user_meta.get("country")) if value]
+    user_keywords, exif_keywords, keywords = dedupe_keywords(
+        user_meta.get("keywords", []), [*exif_keywords], [*keywords]
+    )
+    exif_keywords = [k for k in exif_keywords if normalize(k) not in {normalize(p) for p in place}]
+    keywords = [k for k in keywords if normalize(k) not in {normalize(p) for p in place}]
 
     lines = [
         f"Image file: {path.name}",
         f"Folder: {path.parent.name}",
         f"Full path: {path}",
-        "Vision summary:",
-        summary,
     ]
+    if user_meta.get("title"):
+        lines.append(f"Title: {user_meta['title']}")
+    if user_meta.get("description"):
+        lines.append(f"Description: {user_meta['description']}")
+    if user_keywords:
+        lines.append(f"Tags: {', '.join(user_keywords)}")
+    if user_meta.get("people"):
+        lines.append(f"People: {', '.join(user_meta['people'])}")
+    if place:
+        lines.append(f"Place: {', '.join(place)}")
+    lines += ["Vision summary:", summary]
     if keywords:
         lines.append(f"Searchable keywords: {', '.join(keywords)}")
     if exif_keywords:
@@ -715,6 +737,10 @@ def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
         "image_exif": exif,
         "image_exif_keywords": exif_keywords,
         "image_capture_time": capture_time,
+        "image_title": user_meta.get("title", ""),
+        "image_description": user_meta.get("description", ""),
+        "image_user_keywords": user_keywords,
+        "image_people": user_meta.get("people", []),
         "image_vision_model": config.IMAGE_VISION_MODEL,
     }
     return "\n".join(lines).strip(), metadata
