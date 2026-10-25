@@ -34,9 +34,16 @@ from typing import Any
 import requests
 
 import config
-from exif_keywords import capture_datetime, derive_exif_keywords
+from exif_keywords import capture_datetime, derive_exif_keywords, gps_position, locate
 from xmp_iptc import dedupe_keywords, deduplicate_against, extract_xmp_iptc, normalize
 logger = logging.getLogger(__name__)
+
+try:  # enables HEIC/HEIF in Pillow
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pass
 
 
 def _has_module(module_name: str) -> bool:
@@ -476,18 +483,37 @@ def _image_bytes_for_vision(path: Path) -> tuple[bytes, str]:
     except ImportError as exc:
         raise RuntimeError("Reading image orientation requires the optional dependency 'Pillow'.") from exc
 
+    max_side = int(config.IMAGE_VISION_MAX_SIDE or 0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", Image.DecompressionBombWarning)
         with Image.open(io.BytesIO(data)) as image:
             orientation = image.getexif().get(274)
-            if orientation not in range(2, 9):
+            needs_rotation = orientation in range(2, 9)
+            needs_resize = max_side > 0 and max(image.size) > max_side
+            needs_convert = image.format not in {"JPEG", "PNG", "WEBP"}
+            if not needs_rotation and not needs_resize and not needs_convert:
                 return data, mime
 
-            corrected = ImageOps.exif_transpose(image)
+            source_format = image.format
+            corrected = ImageOps.exif_transpose(image) if needs_rotation else image.copy()
+            if needs_resize:
+                corrected.thumbnail((max_side, max_side), Image.LANCZOS)
+
             output = io.BytesIO()
-            save_options: dict[str, Any] = {"format": image.format}
-            if image.format == "JPEG":
-                save_options["quality"] = 95
+            if source_format in {"JPEG", "PNG", "WEBP"}:
+                save_format = source_format
+                mime = f"image/{save_format.lower()}".replace("jpg", "jpeg")
+            else:
+                # TIFF/BMP/GIF/... are not reliably accepted by vision servers; PNG is.
+                save_format = "PNG"
+                mime = "image/png"
+            if save_format == "JPEG" and corrected.mode not in {"RGB", "L"}:
+                corrected = corrected.convert("RGB")
+            elif save_format == "PNG" and corrected.mode not in {"RGB", "RGBA", "L", "LA"}:
+                corrected = corrected.convert("RGB")
+            save_options: dict[str, Any] = {"format": save_format}
+            if save_format == "JPEG":
+                save_options["quality"] = 92
             corrected.save(output, **save_options)
             return output.getvalue(), mime
 
@@ -589,7 +615,31 @@ def _extract_image_exif(path: Path) -> dict[str, Any]:
         return normalized
 
 
-def _summarize_image_with_llm(path: Path) -> str:
+IMAGE_PROMPT_VERSION = "2"
+
+
+def _build_vision_prompt(path: Path, context: str = "") -> str:
+    language = str(config.IMAGE_VISION_LANGUAGE or "German").strip()
+    prompt = (
+        "Analyze this image for retrieval in a local RAG index. Answer in exactly this format:\n"
+        f"Headline: a short, factual newspaper-style headline of 6-10 words, in {language}.\n"
+        f"Description: a factual description in {language}, 4-8 sentences. Include visible entities, scene, "
+        "activities, text shown in the image, and notable colors/objects.\n"
+        "Searchable keywords: term one, term two, term three. "
+        "Give concise terms for visible entities, scene, activities, readable text and notable colors/objects, "
+        "each term in German and in English (e.g. Hund, dog, Strand, beach). "
+        "Do not invent details.\n"
+    )
+    if config.IMAGE_VISION_CONTEXT and context.strip():
+        prompt += (
+            "\nUnverified context from the file metadata. Describe only what is visible. "
+            "Use the context only to resolve ambiguity; do not repeat it and do not mention it "
+            f"unless it is visible in the image:\n{context.strip()}\n"
+        )
+    return prompt
+
+
+def _summarize_image_with_llm(path: Path, context: str = "") -> str:
     base_url = _normalize_base_url(config.IMAGE_VISION_BASE_URL)
     if not base_url:
         raise RuntimeError(
@@ -602,17 +652,7 @@ def _summarize_image_with_llm(path: Path) -> str:
 
     image_data, mime = _image_bytes_for_vision(path)
     encoded = base64.b64encode(image_data).decode("ascii")
-    file_context = f"File name: {path.name}. Folder: {path.parent.name}."
-    prompt = (
-        "Describe this image for retrieval in a local RAG index. "
-        "Include visible entities, scene, activities, text shown in the image, approximate place/time cues, "
-        "and notable colors/objects. Keep the description factual and concise in 4-8 sentences. "
-        "After the description, add a separate line exactly in this format: "
-        "Searchable keywords: term one, term two, term three. "
-        "Use concise searchable terms for visible entities, scene, activities, readable text, and notable colors/objects; "
-        "include place/time cues only when supported by the image. Do not invent details. "
-        f"{file_context}"
-    )
+    prompt = _build_vision_prompt(path, context)
 
     headers = {"Content-Type": "application/json"}
     if config.IMAGE_VISION_API_KEY:
@@ -652,6 +692,7 @@ def _summarize_image_with_llm(path: Path) -> str:
     if not choices:
         raise RuntimeError("Vision model returned no choices.")
     message = (choices[0] or {}).get("message") or {}
+    finish_reason = (choices[0] or {}).get("finish_reason")
     content = message.get("content", "")
     if isinstance(content, list):
         content = "\n".join(
@@ -659,15 +700,33 @@ def _summarize_image_with_llm(path: Path) -> str:
             for item in content
             if isinstance(item, dict) and item.get("type") in {None, "text"}
         )
-    summary = str(content).strip()
+    summary = re.sub(r"(?is)<think>.*?(</think>|$)", "", str(content or "")).strip()
     if not summary:
-        raise RuntimeError("Vision model returned an empty image summary.")
+        reasoned = bool(message.get("reasoning_content") or message.get("reasoning"))
+        hint = ""
+        if finish_reason == "length":
+            hint = (
+                " The token limit was reached"
+                + (" while the model was still thinking" if reasoned else "")
+                + f"; raise IMAGE_VISION_MAX_TOKENS (now {int(config.IMAGE_VISION_MAX_TOKENS)}),"
+                " e.g. to 4000, or disable thinking for this model in LM Studio."
+            )
+        raise RuntimeError(
+            f"Vision model '{model}' returned an empty image summary (finish_reason={finish_reason}).{hint}"
+        )
     return summary
 
 
-def _parse_image_analysis(response: str) -> tuple[str, list[str]]:
+def _parse_image_analysis(response: str) -> tuple[str, str, list[str]]:
+    """Split a vision response into (headline, description, keywords)."""
     sections = re.split(r"(?im)^\s*searchable keywords\s*:\s*", response, maxsplit=1)
-    description = re.sub(r"(?im)^\s*description\s*:\s*", "", sections[0], count=1).strip()
+    body = sections[0]
+    headline = ""
+    match = re.search(r"(?im)^\s*headline\s*:\s*(.+)$", body)
+    if match:
+        headline = match.group(1).strip(" \t*\"")
+        body = body[: match.start()] + body[match.end():]
+    description = re.sub(r"(?im)^\s*description\s*:\s*", "", body, count=1).strip()
     keywords: list[str] = []
     if len(sections) > 1:
         seen: set[str] = set()
@@ -677,14 +736,49 @@ def _parse_image_analysis(response: str) -> tuple[str, list[str]]:
             if cleaned and normalized not in seen:
                 keywords.append(cleaned)
                 seen.add(normalized)
-    return description, keywords
+    return headline, description, keywords
+
+
+def image_analysis_fingerprint() -> str:
+    """Hash of everything that changes the stored analysis; a change triggers re-analysis."""
+    parts = [
+        IMAGE_PROMPT_VERSION,
+        str(config.IMAGE_VISION_MODEL),
+        str(config.IMAGE_VISION_MAX_SIDE),
+        str(config.IMAGE_VISION_LANGUAGE),
+        str(config.IMAGE_VISION_CONTEXT),
+        ",".join(config.IMAGE_EXIF_FIELDS),
+        ",".join(config.IMAGE_XMP_FIELDS),
+        ",".join(config.IMAGE_METADATA_IGNORE_VALUES),
+        str(config.IMAGE_EXIF_DERIVE_KEYWORDS),
+        ",".join(config.IMAGE_KEYWORD_LANGUAGES),
+        str(config.IMAGE_EXIF_GEOCODE),
+    ]
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _vision_context(path: Path, exif: dict[str, Any], user_meta: dict[str, Any]) -> str:
+    lines: list[str] = []
+    moment = capture_datetime(exif) if exif else None
+    if moment:
+        lines.append(f"Date taken: {moment.date().isoformat()}")
+    place = [value for value in (user_meta.get("city"), user_meta.get("country")) if value]
+    position = gps_position(exif) if exif else None
+    if not place and position and config.IMAGE_EXIF_GEOCODE:
+        place = locate(*position)[:3]
+    if place:
+        lines.append(f"Place: {', '.join(place)}")
+    folder = path.parent.name
+    if folder and not re.fullmatch(r"[\d\W_]*", folder):
+        lines.append(f"Folder name: {folder}")
+    return "\n".join(lines)
 
 
 def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
-    analysis = _summarize_image_with_llm(path)
-    summary, keywords = _parse_image_analysis(analysis)
     exif = _extract_image_exif(path)
     user_meta = extract_xmp_iptc(path)
+    analysis = _summarize_image_with_llm(path, context=_vision_context(path, exif, user_meta))
+    headline, summary, keywords = _parse_image_analysis(analysis)
     exif = deduplicate_against(
         {key: user_meta.get(key, "") for key in ("title", "description")}, exif
     )
@@ -710,6 +804,8 @@ def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
     ]
     if user_meta.get("title"):
         lines.append(f"Title: {user_meta['title']}")
+    if headline:
+        lines.append(f"Headline: {headline}")
     if user_meta.get("description"):
         lines.append(f"Description: {user_meta['description']}")
     if user_keywords:
@@ -733,6 +829,7 @@ def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
     metadata = {
         "content_kind": "image",
         "image_summary": summary,
+        "image_headline": headline,
         "image_keywords": keywords,
         "image_exif": exif,
         "image_exif_keywords": exif_keywords,
@@ -742,6 +839,7 @@ def _read_image(path: Path) -> tuple[str, dict[str, Any]]:
         "image_user_keywords": user_keywords,
         "image_people": user_meta.get("people", []),
         "image_vision_model": config.IMAGE_VISION_MODEL,
+        "image_analysis_fingerprint": image_analysis_fingerprint(),
     }
     return "\n".join(lines).strip(), metadata
 

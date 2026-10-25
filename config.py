@@ -50,6 +50,14 @@ IMAGE_VISION_MODEL = os.getenv("IMAGE_VISION_MODEL", LM_STUDIO_MODEL)
 IMAGE_VISION_API_KEY = os.getenv("IMAGE_VISION_API_KEY", "")
 IMAGE_VISION_TIMEOUT = int(os.getenv("IMAGE_VISION_TIMEOUT", str(LM_STUDIO_TIMEOUT)))
 IMAGE_VISION_MAX_TOKENS = int(os.getenv("IMAGE_VISION_MAX_TOKENS", "1500"))
+# Longest image side (px) sent to the vision model; 0 disables downscaling
+IMAGE_VISION_MAX_SIDE = int(os.getenv("IMAGE_VISION_MAX_SIDE", "1280"))
+# Language of the generated description and headline
+IMAGE_VISION_LANGUAGE = os.getenv("IMAGE_VISION_LANGUAGE", "German").strip() or "German"
+# Give the vision model date/place/folder hints from EXIF/XMP (as unverified context)
+IMAGE_VISION_CONTEXT = os.getenv("IMAGE_VISION_CONTEXT", "true").strip().lower() not in {"0", "false", "no", "off"}
+# Skip unchanged images already analysed with the same model/prompt/settings when re-scanning
+IMAGE_SKIP_ANALYZED = os.getenv("IMAGE_SKIP_ANALYZED", "true").strip().lower() not in {"0", "false", "no", "off"}
 IMAGE_EXIF_FIELDS = _csv_list(
     os.getenv(
         "IMAGE_EXIF_FIELDS",

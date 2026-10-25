@@ -269,6 +269,23 @@ class RagStore:
             (source,),
         ).fetchone()
 
+    def analysis_state(self, source: str) -> tuple[float | None, str | None] | None:
+        """Return (stored file mtime, image analysis fingerprint) for a source, or None if not indexed."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT metadata_json FROM chunks WHERE source = ? ORDER BY chunk_index LIMIT 1",
+                (source,),
+            ).fetchone()
+            if row is None:
+                return None
+            record = self._get_document_record(source)
+        try:
+            fingerprint = json.loads(row["metadata_json"]).get("image_analysis_fingerprint")
+        except (TypeError, ValueError):
+            fingerprint = None
+        changed = _parse_timestamp(record["file_changed_at"]) if record is not None else None
+        return changed, fingerprint
+
     def _extract_file_changed_timestamp(self, metadata: dict[str, Any]) -> float | None:
         for key in (
             "file_changed_epoch",
@@ -501,6 +518,7 @@ class RagStore:
         self,
         documents: list[str],
         metadatas: list[dict[str, Any]] | None = None,
+        force_replace: bool = False,
     ) -> dict[str, int]:
         with self._lock:
             metadata_list = metadatas or [{} for _ in documents]
@@ -534,12 +552,13 @@ class RagStore:
                     if existing_record is not None:
                         existing_changed_ts = _parse_timestamp(existing_record["file_changed_at"])
 
-                    if file_changed_ts is None:
-                        skipped_outdated_sources.add(source)
-                        continue
-                    if existing_changed_ts is not None and file_changed_ts <= existing_changed_ts:
-                        skipped_outdated_sources.add(source)
-                        continue
+                    if not force_replace:
+                        if file_changed_ts is None:
+                            skipped_outdated_sources.add(source)
+                            continue
+                        if existing_changed_ts is not None and file_changed_ts <= existing_changed_ts:
+                            skipped_outdated_sources.add(source)
+                            continue
 
                     deleted_chunks += self._delete_chunks_for_source(source)
                     replaced_sources.add(source)

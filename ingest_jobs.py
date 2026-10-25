@@ -19,8 +19,15 @@ from time import time
 from typing import Any
 from uuid import uuid4
 
+import config
 from collections_manager import CollectionsManager
-from document_loader import discover_documents, load_document
+from document_loader import (
+    FILE_TYPE_CATEGORIES,
+    discover_documents,
+    image_analysis_fingerprint,
+    infer_collection_name,
+    load_document,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,7 @@ class IngestJob:
     failed_files: int = 0
     skipped_files: int = 0
     skipped_by_type: int = 0
+    skipped_unchanged: int = 0
     documents_uploaded: int = 0
     chunks_uploaded: int = 0
     current_file: str | None = None
@@ -132,6 +140,7 @@ class IngestJobManager:
             "failed_files": job.failed_files,
             "skipped_files": job.skipped_files,
             "skipped_by_type": job.skipped_by_type,
+            "skipped_unchanged": job.skipped_unchanged,
             "documents_uploaded": job.documents_uploaded,
             "chunks_uploaded": job.chunks_uploaded,
             "current_file": job.current_file,
@@ -215,6 +224,27 @@ class IngestJobManager:
                             fh.write(f"SKIP (type not allowed in '{explicit_entry.name}'): {file_path}\n")
                         continue
 
+                    force_replace = False
+                    if config.IMAGE_SKIP_ANALYZED and file_path.suffix.lower() in FILE_TYPE_CATEGORIES["Images"]:
+                        probe_collection = job.collection_name
+                        if probe_collection == "all":
+                            probe_collection = infer_collection_name(file_path)
+                        state = self.collections.get_store(probe_collection).analysis_state(
+                            str(file_path.expanduser().resolve())
+                        )
+                        if state is not None and state[1]:
+                            stored_changed, stored_fingerprint = state
+                            current_changed = file_path.stat().st_mtime
+                            if stored_fingerprint != image_analysis_fingerprint():
+                                force_replace = True
+                            elif stored_changed is not None and current_changed <= stored_changed:
+                                with self._lock:
+                                    job.skipped_unchanged += 1
+                                    job.processed_files += 1
+                                with open(log_path, "a", encoding="utf-8") as fh:
+                                    fh.write(f"SKIP (already analyzed): {file_path}\n")
+                                continue
+
                     loaded_document = load_document(
                         file_path,
                         ocr_enabled=bool(explicit_entry.ocr_enabled) if explicit_entry is not None else False,
@@ -240,7 +270,9 @@ class IngestJobManager:
                     file_start = time()
                     with self.collections.write_lock(target_collection):
                         result = target_store.add_documents(
-                            [loaded_document.content], [loaded_document.metadata]
+                            [loaded_document.content],
+                            [loaded_document.metadata],
+                            force_replace=force_replace,
                         )
                         self.collections.touch(target_collection)
                     elapsed = time() - file_start
@@ -272,6 +304,7 @@ class IngestJobManager:
                 fh.write(
                     f"JOB COMPLETED: {job_id} | ok={job.succeeded_files} failed={job.failed_files} "
                     f"skipped={job.skipped_files} skipped_by_type={job.skipped_by_type} "
+                    f"skipped_unchanged={job.skipped_unchanged} "
                     f"| elapsed={time() - start_time:.1f}s\n"
                 )
 

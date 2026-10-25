@@ -252,10 +252,14 @@ Supported file types span several categories:
 
 Image files are summarized through a vision model and stored together with selected EXIF fields
 (see `IMAGE_EXIF_FIELDS`) and keywords derived from them (format, date/season, camera direction,
-edited-with, offline place names from GPS, ...), indexed in English and German;
-the summary also includes file/folder-name context for better retrieval. To preview what would be
+edited-with, offline place names from GPS, ...), indexed in English and German. The model returns a
+headline, a German description and German+English keywords (`IMAGE_VISION_LANGUAGE`); it also
+receives the date/place as unverified context. To preview what would be
 extracted for a photo folder without indexing anything, run
-`python tests/manual_exif_keywords.py <folder> -o exif_keywords.csv`. Text, web, data, and
+`python tests/manual_exif_keywords.py <folder> -o exif_keywords.csv`; to dump the vision results
+(headline, description, keywords, seconds per photo; resumable, optional model comparison with
+`--models a,b`, `--no-context`/`--both-contexts`, `--random --limit 50`) run
+`python tests/manual_vision_report.py <folder> -o vision.xlsx`. Text, web, data, and
 code files are read as plain UTF-8; HTML is stripped to text; Excel and PowerPoint need the
 optional `openpyxl` / `python-pptx` dependencies (installed via
 `requirements.txt`). When creating a database in the web UI you pick allowed types by category,
@@ -409,7 +413,11 @@ The server can be configured using environment variables. Copy `.env.example` to
 - `IMAGE_VISION_MODEL`: Model used to summarize images (default: `LM_STUDIO_MODEL`)
 - `IMAGE_VISION_API_KEY`: Optional API key for the vision endpoint
 - `IMAGE_VISION_TIMEOUT`: Timeout for image-analysis requests in seconds
-- `IMAGE_VISION_MAX_TOKENS`: Maximum output tokens for image summaries
+- `IMAGE_VISION_MAX_TOKENS`: Maximum output tokens for the image response (headline, description, keywords; 600 recommended)
+- `IMAGE_VISION_MAX_SIDE`: Longest image side in pixels sent to the vision model (default: `1280`, `0` = original). Images are rotated per EXIF orientation first; TIFF/BMP/GIF are sent as PNG
+- `IMAGE_VISION_LANGUAGE`: Language of the generated headline and description (default: `German`); keywords are requested in German and English
+- `IMAGE_VISION_CONTEXT`: Give the model capture date, place (XMP or offline geocoder) and folder name as unverified context (default: `true`); it is instructed to describe only what is visible
+- `IMAGE_SKIP_ANALYZED`: When re-scanning, skip unchanged images that were analysed with the same model, prompt and relevant settings (default: `true`). A changed model, language or EXIF/XMP setting re-analyses the image and replaces its entry; the fingerprint is stored as `image_analysis_fingerprint`. Set `false` to force re-analysis
 - `IMAGE_EXIF_FIELDS`: Comma-separated EXIF tags to persist when present (GPS tags use the `GPS:` prefix, e.g. `GPS:GPSLatitude`). Tags are read from the base, Exif and GPS directories; values are normalized (rationals to numbers, GPS coordinates to decimal degrees, `Flash`/`ExposureProgram`/`ExposureMode`/`SceneCaptureType`/`SubjectDistanceRange` to words, `ExposureTime` as `1/250`). The defaults exclude privacy-relevant tags (`GPS:*`, `Artist`); add them in your own `.env`
 - `IMAGE_EXIF_DERIVE_KEYWORDS`: Derive extra keywords from the stored EXIF values (default: `true`): portrait/landscape format, year, month, season (hemisphere-aware), weekday, time of day, camera facing direction, edited-with/scanned (from `Software`), camera/lens, wide angle/telephoto, low light, long exposure, etc. They are added to the indexed text as `Photo keywords:` and stored as `image_exif_keywords`; the capture time incl. `SubsecTimeOriginal` is stored as `image_capture_time` for ordering burst images. Only tags listed in `IMAGE_EXIF_FIELDS` can contribute
 - `IMAGE_KEYWORD_LANGUAGES`: Languages of the derived photo keywords, comma-separated, `en` and/or `de` (default: `en,de`). With both, every derived keyword is indexed in English and German (e.g. `summer, Sommer`), so keyword matches work for questions in either language. Raw EXIF values and place names are never translated
@@ -540,7 +548,7 @@ Contributions welcome! Feel free to submit issues and pull requests.
 ## To Do
 - Replace custommade text splitter by llamaindex (or langchain?) text splitter (more complex but better quality). could solve this pblm as well: make it more robust: when many files are uploaded only some hits are returned for a key-word, not all
 - Add architectural details to source code project (dependency graph, classes...) so that the model gets a better overview
-- make foto ingestion more meaningful, e.g. by multiple passes so that the llm learns who shown in the picture via meta data (and some guessing). Alternative: provide golden samples with persons taked with their names. Further: add a way to provide context information, e.g. birth dates, so that a birthday party can be assigned to a specific person...
+- make foto ingestion more meaningful, e.g. by multiple passes so that the llm learns who shown in the picture via meta data (and some guessing). Alternative: provide golden samples with persons tagged with their names (in Exif tags e.g.). Further: add a way to provide context information, e.g. birth dates, so that a birthday party can be assigned to a specific person...
 - add the possibility to configure cron-jobs for ingestion runs per collection
 - Multi-user access to server: add MCP client authentication and/or identity. Therefore the fine grain access control to the RAG needs to be made configurable per user.
-- EXIF extraction improvements: burst grouping, duplicate detection and an "edited" filter. We only store image_capture_time and the keywords. Additonal feature: a search or tool on top of them. Further Sub-seconds (SubsecTimeOriginal) is used for ordering only; there's no burst keyword. XMP/IPTC: its suggested reading Lightroom or Google Photos keywords. It's an option if the fotos has them.
+- EXIF extraction improvements: burst grouping, duplicate detection and an "edited" filter. We only store image_capture_time and the keywords. Additonal feature: a search or tool on top of them. Further Sub-seconds (SubsecTimeOriginal) is used for ordering only; there's no burst keyword. 

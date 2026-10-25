@@ -101,7 +101,7 @@ class TestSupportAndCatalog:
         monkeypatch.setattr(
             dl,
             "_summarize_image_with_llm",
-            lambda _path: "A scenic mountain view.\nSearchable keywords: mountain, alpine lake, hiking",
+            lambda _path, **_kw: "A scenic mountain view.\nSearchable keywords: mountain, alpine lake, hiking",
         )
         monkeypatch.setattr(dl, "_extract_image_exif", lambda _path: {"Make": "Canon"})
 
@@ -319,7 +319,7 @@ class TestOCR:
         path = tmp_path / "photo.png"
         path.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-        monkeypatch.setattr(dl, "_summarize_image_with_llm", lambda _path: "A scenic mountain view.")
+        monkeypatch.setattr(dl, "_summarize_image_with_llm", lambda _path, **_kw: "A scenic mountain view.")
         monkeypatch.setattr(dl, "_extract_image_exif", lambda _path: {})
 
         loaded = dl.load_document(path, ocr_enabled=False)
@@ -331,7 +331,7 @@ class TestOCR:
         path.write_bytes(b"\x89PNG\r\n\x1a\n")
 
         monkeypatch.setattr(dl, "is_ocr_available", lambda: False)
-        monkeypatch.setattr(dl, "_summarize_image_with_llm", lambda _path: "A scenic mountain view.")
+        monkeypatch.setattr(dl, "_summarize_image_with_llm", lambda _path, **_kw: "A scenic mountain view.")
         monkeypatch.setattr(dl, "_extract_image_exif", lambda _path: {})
 
         loaded = dl.load_document(path, ocr_enabled=True)
@@ -346,7 +346,7 @@ class TestOCR:
 
         vision_calls: list[Path] = []
         ocr_calls: list[object] = []
-        monkeypatch.setattr(dl, "_summarize_image_with_llm", lambda p: vision_calls.append(p) or "A scenic mountain view.")
+        monkeypatch.setattr(dl, "_summarize_image_with_llm", lambda p, **_kw: vision_calls.append(p) or "A scenic mountain view.")
         monkeypatch.setattr(dl, "_extract_image_exif", lambda _path: {})
         monkeypatch.setattr(dl, "is_ocr_available", lambda: True)
         monkeypatch.setattr(dl, "_open_image_rgb", lambda _path: object())

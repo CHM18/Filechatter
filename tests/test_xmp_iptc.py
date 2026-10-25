@@ -136,7 +136,7 @@ def test_dedupe_keywords_across_groups():
 def test_read_image_integrates_and_deduplicates(tmp_path, monkeypatch):
     path = tmp_path / "h.jpg"
     Image.new("RGB", (8, 8)).save(path, xmp=_xmp(t=TITLE, s=SUBJECT, d=DESC.format("Eine Zwergfledermaus"), r=REGIONS))
-    monkeypatch.setattr(dl, "_summarize_image_with_llm", lambda _p: "Description: Eine Fledermaus.\nSearchable keywords: keller, Nacht")
+    monkeypatch.setattr(dl, "_summarize_image_with_llm", lambda _p, **_kw: "Description: Eine Fledermaus.\nSearchable keywords: keller, Nacht")
     monkeypatch.setattr(dl, "_extract_image_exif", lambda _p: {"ImageDescription": "Eine Zwergfledermaus", "Software": "NIKON D850 Ver.1.20"})
     monkeypatch.setattr(dl.config, "IMAGE_EXIF_FIELDS", ["ImageDescription", "Software"])
     monkeypatch.setattr(dl.config, "IMAGE_EXIF_DERIVE_KEYWORDS", True)

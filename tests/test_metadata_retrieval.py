@@ -23,6 +23,21 @@ def test_source_path_matches_outrank_generic_content_matches(data_env, monkeypat
     assert results[1].source == "notes/general.txt"
 
 
+def test_analysis_state_and_force_replace(data_env):
+    store = RagStore("analysis-state")
+    meta = {"source": "a.jpg", "file_changed_epoch": 100.0, "image_analysis_fingerprint": "fp1"}
+    assert store.analysis_state("a.jpg") is None
+    store.add_documents(["first"], [meta])
+    assert store.analysis_state("a.jpg") == (100.0, "fp1")
+
+    result = store.add_documents(["second"], [{**meta, "image_analysis_fingerprint": "fp2"}])
+    assert result["documents_uploaded"] == 0
+
+    result = store.add_documents(["second"], [{**meta, "image_analysis_fingerprint": "fp2"}], force_replace=True)
+    assert result["documents_uploaded"] == 1
+    assert store.analysis_state("a.jpg") == (100.0, "fp2")
+
+
 def test_search_returns_no_results_when_collection_is_not_readable(data_env):
     store = RagStore("read-disabled")
     store.add_documents(["A document about turbine maintenance."], [{"source": "doc.txt"}])
