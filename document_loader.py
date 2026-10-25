@@ -515,8 +515,8 @@ def _exif_scalar(value: Any) -> Any:
         return value
     try:
         number = float(value)
-    except (TypeError, ValueError):
-        return str(value).strip()
+    except (TypeError, ValueError, ArithmeticError):
+        return None if hasattr(value, "denominator") else str(value).strip()
     if number != number or number in (float("inf"), float("-inf")):
         return None
     return round(number, 6)
@@ -578,7 +578,11 @@ def _extract_image_exif(path: Path) -> dict[str, Any]:
                 name = f"{prefix}{tag_names.get(key, key)}"
                 if name not in wanted or name in normalized:
                     continue
-                value = _format_exif_value(name, raw_value)
+                try:
+                    value = _format_exif_value(name, raw_value)
+                except Exception:
+                    logger.debug("Skipping unreadable EXIF tag %s in %s", name, path, exc_info=True)
+                    continue
                 if value is not None:
                     normalized[name] = value
         return normalized

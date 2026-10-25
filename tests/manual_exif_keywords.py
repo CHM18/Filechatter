@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 import warnings
 from pathlib import Path
@@ -37,12 +38,34 @@ except ImportError:
     pass
 
 EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".webp", ".heic", ".heif"}
+FRACTION = re.compile(r"^\d+/\d+$")
+
+
+def csv_safe(value):
+    """Excel turns '1/11' into a date; ="1/11" keeps it as text."""
+    if isinstance(value, str) and FRACTION.match(value):
+        return f'="{value}"'
+    return value
+
+
+def write_xlsx(path: str, columns: list[str], rows: list[dict]) -> None:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(columns)
+    for row in rows:
+        sheet.append([str(row.get(column, "")) for column in columns])
+    for line in sheet.iter_rows(min_row=2):
+        for cell in line:
+            cell.number_format = "@"
+    workbook.save(path)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Dump EXIF values and derived keywords of a photo folder")
     parser.add_argument("folder", type=Path)
-    parser.add_argument("-o", "--output", default="exif_keywords.csv")
+    parser.add_argument("-o", "--output", default="exif_keywords.csv", help="CSV, or .xlsx for Excel (all cells as text)")
     parser.add_argument("--delimiter", default=";")
     parser.add_argument("--no-recursive", action="store_true")
     args = parser.parse_args()
@@ -52,25 +75,31 @@ def main() -> int:
     columns = ["file", "capture_time", "keywords", *config.IMAGE_EXIF_FIELDS]
 
     errors = 0
-    with open(args.output, "w", newline="", encoding="utf-8-sig") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns, delimiter=args.delimiter, extrasaction="ignore")
-        writer.writeheader()
-        for path in files:
-            try:
-                exif = _extract_image_exif(path)
-            except Exception as exc:
-                errors += 1
-                print(f"ERROR {path}: {exc}", file=sys.stderr)
-                continue
-            moment = capture_datetime(exif)
-            row = {
-                "file": str(path.relative_to(args.folder)),
-                "capture_time": moment.isoformat() if moment else "",
-                "keywords": ", ".join(derive_exif_keywords(exif)),
-                **{key: json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value
-                   for key, value in exif.items()},
-            }
-            writer.writerow(row)
+    rows: list[dict] = []
+    for path in files:
+        try:
+            exif = _extract_image_exif(path)
+        except Exception as exc:
+            errors += 1
+            print(f"ERROR {path}: {exc}", file=sys.stderr)
+            continue
+        moment = capture_datetime(exif)
+        rows.append({
+            "file": str(path.relative_to(args.folder)),
+            "capture_time": moment.isoformat() if moment else "",
+            "keywords": ", ".join(derive_exif_keywords(exif)),
+            **{key: json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value
+               for key, value in exif.items()},
+        })
+
+    if args.output.lower().endswith(".xlsx"):
+        write_xlsx(args.output, columns, rows)
+    else:
+        with open(args.output, "w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns, delimiter=args.delimiter, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: csv_safe(value) for key, value in row.items()})
 
     print(f"{len(files)} images, {errors} errors -> {args.output}")
     return 0

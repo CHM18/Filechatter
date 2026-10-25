@@ -186,6 +186,22 @@ class TestSupportAndCatalog:
             "GPS:GPSLongitude": 8.26,
         }
 
+    def test_extract_exif_ignores_rationals_with_zero_denominator(self, tmp_path, monkeypatch):
+        from PIL import ExifTags, Image
+        from PIL.TiffImagePlugin import IFDRational
+
+        path = tmp_path / "zero.jpg"
+        exif = Image.Exif()
+        exif[271] = "Canon"
+        exif.get_ifd(ExifTags.IFD.Exif).update({37382: IFDRational(1, 0), 33437: IFDRational(28, 10)})
+        exif.get_ifd(ExifTags.IFD.GPSInfo).update({2: (IFDRational(47, 1), IFDRational(30, 0), IFDRational(0, 0))})
+        Image.new("RGB", (4, 2)).save(path, exif=exif)
+        monkeypatch.setattr(
+            dl.config, "IMAGE_EXIF_FIELDS", ["Make", "SubjectDistance", "FNumber", "GPS:GPSLatitude"]
+        )
+
+        assert dl._extract_image_exif(path) == {"Make": "Canon", "FNumber": 2.8}
+
     @pytest.mark.parametrize("orientation", [None, 1])
     def test_vision_does_not_rotate_image_without_needed_correction(self, tmp_path, monkeypatch, orientation):
         import base64
