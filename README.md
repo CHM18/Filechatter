@@ -272,6 +272,34 @@ optional `openpyxl` / `python-pptx` dependencies (installed via
 or switch to **Individual types** for per-extension control; leaving everything unselected
 accepts all supported types.
 
+#### Word textboxes, controls, and heading-aware chunks
+
+DOCX extraction walks document blocks in XML order, including:
+
+- Body paragraphs, hyperlinks, and tables (including nested tables), without moving tables to the end.
+- Modern DrawingML and legacy VML textboxes, including their paragraphs and tables. Only one branch of Word's alternate-content markup is read, avoiding duplicate modern/legacy copies.
+- Content controls, including their stored text/date/dropdown values, and modern/legacy checkbox states (`[x]` / `[ ]`). Field results are read as saved; fields are not recalculated and macros/ActiveX controls are not executed.
+- Headers and footers, appended as labelled sections; shared parts are extracted once rather than repeated per page.
+- Optional image OCR in body paragraphs, table cells, textboxes, and headers/footers when their images use DrawingML references.
+
+Word titles and outline headings (including inherited styles) become Markdown-style headings.
+The chunker recognizes these and Markdown ATX (`# Heading`) / Setext (underlined) headings,
+ignoring heading-like text inside fenced code blocks. It prefers splitting **before** a heading
+and keeps consecutive headings with their first following paragraph when that block fits
+`CHUNK_SIZE_CHARS + CHUNK_SPLIT_MARGIN`. Oversized blocks still split to bound chunk size.
+Overlap is reduced or omitted where needed to avoid starting inside a protected heading block.
+Unstyled plain-text titles are not guessed from capitalization or font size.
+
+This preserves logical/anchor order, not Word's exact visual page layout. Floating shapes may
+appear near their anchors rather than in visual reading order. Footnotes/endnotes, comments,
+embedded objects, SmartArt relationships, and live ActiveX values are not extracted by this path.
+Tracked deletions are omitted; inserted text is included.
+
+**Already indexed documents need reprocessing:** unchanged modification timestamps cause normal
+ingestion to skip replacement. Remove only the affected sources from the index, then ingest the
+original DOCX files again. Restart the backend before re-ingesting to load the updated reader and
+chunker. Existing stored chunks are not rewritten automatically.
+
 For legacy `doc` files, Filechatter uses Microsoft Word automation on Windows when available. If Word or `pywin32` is unavailable, those files are skipped while the rest of the directory is still indexed.
 
 #### Compatibility chat endpoint:
@@ -509,6 +537,14 @@ Tests run against a temporary data directory with a deterministic fake embedding
 ### MCP tools return "Filechatter server is not reachable"
 - The MCP proxy forwards all tool calls to the Filechatter server - start it first (`.\rag.ps1`)
 - If the server runs on a non-default host/port, set `RAG_SERVER_URL` in the proxy's environment
+
+### MCP reports "Server transport closed unexpectedly" (including after standby)
+- This message concerns the MCP host's connection to `rag_mcp_server.py`, not necessarily the RAG HTTP server. Check `http://localhost:8000/health` separately before restarting the backend.
+- The proxy writes timestamped diagnostics to **stderr** (visible in the host's MCP log) and to `logs/mcp-proxy-<pid>.log` beside the proxy script. Each process has its own file so multiple hosts do not share a log. Logs include startup, process/parent IDs, backend address, tool registration, backend failures, shutdown, and Python exception tracebacks. Proxy request diagnostics omit tool arguments, document contents, and backend response bodies.
+- A **normal transport return** usually means the host closed stdin (EOF). After standby, reconnect/restart Filechatter in the MCP host. The proxy cannot reattach a closed stdio pipe, so it deliberately does not loop/restart itself on EOF.
+- **Ctrl+C/SIGINT**, **SIGTERM**, and **uncaught Python exceptions** have distinct log messages. Native fatal-error tracebacks are enabled on stderr where supported. Forced process termination, a host crash, or power loss can prevent any final log entry; a startup without a shutdown entry is not proof of a standby-related bug.
+- Backend connection errors/timeouts do not terminate the proxy. Retry once the backend is available; requests are not automatically replayed because ingest/delete operations might already have executed. A timeout does not cancel an operation on the backend.
+- If file logging is unavailable (for example, the installation directory is read-only), the proxy warns and continues with stderr logging. Per-process logs are not automatically pruned; remove old files when no longer needed.
 
 ### PDF or DOCX ingestion reports a missing dependency
 - Call `get_document_support` in LM Studio to see reader readiness by file type

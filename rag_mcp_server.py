@@ -16,13 +16,22 @@ otherwise every tool returns a clear error message instead of failing.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
+import logging
 import os
+from pathlib import Path
+import signal
+import sys
+import time
+from types import FrameType
 from typing import Any
 
 import requests
 from mcp.server.fastmcp import FastMCP
 
 import config
+
+logger = logging.getLogger("filechatter.mcp")
 
 # On Windows, Proactor + stdio pipes can emit noisy ConnectionResetError logs
 # when MCP hosts terminate a session after their own timeout.
@@ -63,6 +72,11 @@ def _call(tool_name: str, arguments: dict[str, Any], timeout: int = DEFAULT_TIME
             timeout=timeout,
         )
     except requests.exceptions.ConnectionError:
+        logger.warning(
+            "Backend connection failed: tool=%s server=%s. Proxy remains running; "
+            "check the backend and retry. The request was not automatically replayed.",
+            tool_name, SERVER_URL,
+        )
         return {
             "status": "error",
             "message": (
@@ -71,12 +85,18 @@ def _call(tool_name: str, arguments: dict[str, Any], timeout: int = DEFAULT_TIME
             ),
         }
     except requests.exceptions.Timeout:
+        logger.warning(
+            "Backend request timed out: tool=%s timeout=%ss. Proxy remains running; "
+            "the operation may still be running on the backend. Not automatically replaying it.",
+            tool_name, timeout,
+        )
         return {
             "status": "error",
             "message": f"Filechatter server did not answer within {timeout}s for tool '{tool_name}'.",
         }
 
     if response.status_code != 200:
+        logger.warning("Backend returned HTTP %s: tool=%s", response.status_code, tool_name)
         detail: Any
         try:
             detail = response.json().get("detail", response.text)
@@ -169,9 +189,19 @@ def _fetch_visible_tool_names() -> set[str] | None:
     try:
         response = requests.get(f"{SERVER_URL}/tools", params={"visible": "true"}, timeout=10)
         if response.status_code != 200:
+            logger.warning(
+                "Tool visibility lookup returned HTTP %s; advertising all tools. "
+                "Backend permissions still apply to every call.",
+                response.status_code,
+            )
             return None
         return {tool["name"] for tool in response.json().get("tools", [])}
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as exc:
+        logger.warning(
+            "Tool visibility lookup failed (%s) at %s; advertising all tools. "
+            "Backend permissions still apply to every call.",
+            type(exc).__name__, SERVER_URL,
+        )
         return None
 
 
@@ -187,8 +217,69 @@ def register_tools() -> list[str]:
     return names
 
 
-register_tools()
+def _configure_logging() -> None:
+    # stdout is exclusively for MCP JSON-RPC messages.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s pid=%(process)d] %(message)s",
+        stream=sys.stderr,
+        force=True,
+    )
+    log_path = Path(__file__).resolve().parent / "logs" / f"mcp-proxy-{os.getpid()}.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+    except OSError:
+        logger.warning("Cannot open proxy log %s; logging to stderr only.", log_path, exc_info=True)
+    else:
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s [%(name)s pid=%(process)d] %(message)s"
+        ))
+        logging.getLogger().addHandler(handler)
+        logger.info("Persistent proxy log: %s", log_path)
+
+
+def _handle_termination(signum: int, _frame: FrameType | None) -> None:
+    logger.warning("Received %s from the host or operating system.", signal.Signals(signum).name)
+    raise SystemExit(128 + signum)
+
+
+def main() -> int:
+    _configure_logging()
+    started = time.monotonic()
+    logger.info(
+        "Starting MCP stdio proxy: parent_pid=%s python=%s backend=%s. "
+        "This process is separate from the RAG HTTP server.",
+        os.getppid(), sys.version.split()[0], SERVER_URL,
+    )
+    try:
+        faulthandler.enable()
+    except (OSError, RuntimeError, ValueError):
+        logger.warning("Cannot enable native crash tracebacks on stderr.", exc_info=True)
+    previous_sigterm = signal.signal(signal.SIGTERM, _handle_termination)
+    try:
+        names = register_tools()
+        logger.info("Registered %s tools; starting MCP stdio transport.", len(names))
+        mcp.run()
+        logger.info(
+            "MCP stdio transport returned normally (usually the host closed stdin/EOF). "
+            "If unexpected after sleep/resume, reconnect or restart Filechatter in the MCP host; "
+            "a closed stdio connection cannot be reattached by this process."
+        )
+        return 0
+    except KeyboardInterrupt:
+        logger.info("MCP proxy interrupted (Ctrl+C/SIGINT).")
+        return 130
+    except SystemExit as exc:
+        logger.info("MCP proxy requested exit: code=%s.", exc.code)
+        raise
+    except Exception:
+        logger.exception("MCP proxy failed; reconnect or restart Filechatter in the MCP host.")
+        return 1
+    finally:
+        logger.info("MCP proxy stopping: elapsed=%.1fs.", time.monotonic() - started)
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":
-    mcp.run()
+    raise SystemExit(main())

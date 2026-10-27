@@ -39,6 +39,142 @@ class TestTextLikeReaders:
 
 
 class TestOfficeReaders:
+    def test_docx_preserves_blocks_textboxes_and_controls(self, tmp_path):
+        from docx import Document
+        from docx.oxml import parse_xml
+
+        document = Document()
+        document.add_heading("Contract", 0)
+        document.add_paragraph("Introduction")
+        document.add_table(rows=1, cols=2).rows[0].cells[0].text = "Table before textbox"
+        document.element.body.insert(-1, parse_xml("""
+            <w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                   xmlns:v="urn:schemas-microsoft-com:vml"
+                   xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                   xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                   xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+              <w:sdtContent>
+                <w:p><w:r><w:t>Control value</w:t></w:r></w:p>
+                <w:p><w:r><w:t>Anchor</w:t>
+                  <mc:AlternateContent>
+                    <mc:Choice Requires="wps"><w:drawing><wps:wsp><wps:txbx>
+                      <w:txbxContent>
+                        <w:p><w:r><w:t>Modern textbox</w:t></w:r></w:p>
+                        <w:tbl><w:tr><w:tc><w:p><w:r><w:t>Textbox table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+                      </w:txbxContent>
+                    </wps:txbx></wps:wsp></w:drawing></mc:Choice>
+                    <mc:Fallback><w:pict><v:shape><v:textbox><w:txbxContent>
+                      <w:p><w:r><w:t>Duplicate fallback</w:t></w:r></w:p>
+                    </w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback>
+                  </mc:AlternateContent>
+                </w:r></w:p>
+                <w:p><w:r><w:pict><v:shape><v:textbox><w:txbxContent>
+                  <w:p><w:r><w:t>Legacy textbox</w:t></w:r></w:p>
+                </w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>
+                <w:p><w:sdt><w:sdtPr><w14:checkbox><w14:checked w14:val="1"/></w14:checkbox></w:sdtPr>
+                  <w:sdtContent><w:r><w:t>Approved</w:t></w:r></w:sdtContent>
+                </w:sdt></w:p>
+              </w:sdtContent>
+            </w:sdt>
+        """))
+        document.add_paragraph("Conclusion")
+        path = tmp_path / "controls.docx"
+        document.save(path)
+
+        text = dl.load_document(path).content
+        expected = ["# Contract", "Introduction", "Table before textbox", "Control value",
+                    "Anchor", "Modern textbox", "Textbox table", "Legacy textbox",
+                    "[x] Approved", "Conclusion"]
+        positions = [text.index(value) for value in expected]
+        assert positions == sorted(positions)
+        assert text.count("Modern textbox") == 1
+        assert "Duplicate fallback" not in text
+
+    def test_docx_inherited_headings_and_shared_headers(self, tmp_path):
+        from docx import Document
+        from docx.enum.style import WD_STYLE_TYPE
+
+        document = Document()
+        style = document.styles.add_style("Custom section", WD_STYLE_TYPE.PARAGRAPH)
+        style.base_style = document.styles["Heading 2"]
+        document.add_paragraph("Inherited heading", style=style)
+        document.add_paragraph("Section body")
+        document.sections[0].header.paragraphs[0].text = "Shared header"
+        document.sections[0].footer.paragraphs[0].text = "Shared footer"
+        document.add_section()
+        path = tmp_path / "sections.docx"
+        document.save(path)
+
+        text = dl.load_document(path).content
+        assert "## Inherited heading\n\nSection body" in text
+        assert text.count("Shared header") == 1
+        assert text.count("Shared footer") == 1
+
+    def test_docx_inline_content_fields_and_fallback(self, tmp_path):
+        from docx import Document
+        from docx.oxml import parse_xml
+
+        document = Document()
+        document.element.body.insert(-1, parse_xml("""
+          <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+               xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+               xmlns:unsupported="urn:unsupported"
+               xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+            <w:r><w:t>Start</w:t><w:tab/></w:r>
+            <w:hyperlink><w:r><w:t>Link text</w:t><w:br/></w:r></w:hyperlink>
+            <w:r><w:instrText>PRIVATE FIELD INSTRUCTION</w:instrText></w:r>
+            <w:r><w:t>Stored field result</w:t></w:r>
+            <w:del><w:r><w:delText>Deleted text</w:delText></w:r></w:del>
+            <w:ins><w:r><w:t> Inserted text</w:t></w:r></w:ins>
+            <w:r><w:fldChar><w:ffData><w:checkBox><w:default w:val="1"/></w:checkBox></w:ffData></w:fldChar></w:r>
+            <w:sdt><w:sdtPr><w14:checkbox><w14:checked w14:val="0"/></w14:checkbox></w:sdtPr>
+              <w:sdtContent><w:r><w:t>&#x2610;</w:t></w:r></w:sdtContent>
+            </w:sdt>
+            <mc:AlternateContent>
+              <mc:Choice Requires="unsupported"><w:r><w:t>Unsupported choice</w:t></w:r></mc:Choice>
+              <mc:Fallback><w:r><w:t>Fallback text</w:t></w:r></mc:Fallback>
+            </mc:AlternateContent>
+          </w:p>
+        """))
+        path = tmp_path / "fields.docx"
+        document.save(path)
+
+        text = dl.load_document(path).content
+        assert "Start\tLink text\nStored field result Inserted text[x] [ ] Fallback text" in text
+        assert "PRIVATE FIELD" not in text
+        assert "Deleted text" not in text
+        assert "Unsupported choice" not in text
+
+    def test_docx_ocr_uses_table_and_header_image_relationships(self, tmp_path, monkeypatch):
+        import io
+        from docx import Document
+        from PIL import Image
+
+        document = Document()
+        buffer = io.BytesIO()
+        Image.new("RGB", (10, 10), color="white").save(buffer, format="PNG")
+        for paragraph in (document.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0],
+                          document.sections[0].header.paragraphs[0]):
+            buffer.seek(0)
+            paragraph.add_run().add_picture(buffer)
+        path = tmp_path / "table-images.docx"
+        document.save(path)
+        monkeypatch.setattr(dl, "is_ocr_available", lambda: True)
+        calls = []
+
+        def fake_ocr(data):
+            calls.append(data)
+            return "Extracted picture text"
+
+        monkeypatch.setattr(dl, "_ocr_image_bytes", fake_ocr)
+        loaded = dl.load_document(path, ocr_enabled=True)
+        assert len(calls) == 2
+        assert loaded.content.count("[Image OCR]: Extracted picture text") == 2
+        assert loaded.metadata["ocr_image_count"] == 2
+        calls.clear()
+        assert "Image OCR" not in dl.load_document(path, ocr_enabled=False).content
+        assert calls == []
+
     def test_reads_xlsx(self, tmp_path):
         import openpyxl
 

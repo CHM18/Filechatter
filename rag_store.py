@@ -485,6 +485,50 @@ class RagStore:
 
         chunk_size = max(config.CHUNK_SIZE_CHARS, 1)
         overlap = max(min(config.CHUNK_OVERLAP_CHARS, chunk_size - 1), 0)
+        max_chunk_size = chunk_size + max(config.CHUNK_SPLIT_MARGIN, 0)
+        heading_pattern = re.compile(
+            r"^ {0,3}#{1,6}[ \t]+\S[^\n]*|"
+            r"^[^\n]+\n {0,3}(?:={3,}|-{3,})[ \t]*(?=\n|$)",
+            re.MULTILINE,
+        )
+        fenced_ranges: list[tuple[int, int]] = []
+        fence_start = 0
+        fence_marker = ""
+        offset = 0
+        for line in normalized_text.splitlines(keepends=True):
+            fence = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\n"))
+            if fence:
+                marker, suffix = fence.groups()
+                if not fence_marker:
+                    fence_start, fence_marker = offset, marker
+                elif marker[0] == fence_marker[0] and len(marker) >= len(fence_marker) and not suffix.strip():
+                    fenced_ranges.append((fence_start, offset + len(line)))
+                    fence_marker = ""
+            offset += len(line)
+        if fence_marker:
+            fenced_ranges.append((fence_start, length))
+        headings = [match for match in heading_pattern.finditer(normalized_text)
+                    if not any(begin <= match.start() < end for begin, end in fenced_ranges)]
+        protected_blocks: list[tuple[int, int]] = []
+        for index, heading in enumerate(headings):
+            body_start = heading.end()
+            while body_start < length and normalized_text[body_start].isspace():
+                body_start += 1
+            # Consecutive headings belong with the same following paragraph.
+            if index + 1 < len(headings) and body_start == headings[index + 1].start():
+                continue
+            block_start = heading.start()
+            while index > 0 and not normalized_text[headings[index - 1].end():block_start].strip():
+                index -= 1
+                block_start = headings[index].start()
+            body_end = normalized_text.find("\n\n", body_start)
+            body_end = length if body_end == -1 else body_end
+            if body_end - block_start > max_chunk_size:
+                # Oversized paragraphs still split, but keep the first word with the heading.
+                first_word = re.match(r"\S+", normalized_text[body_start:])
+                body_end = body_start + len(first_word[0]) if first_word else body_start
+            protected_blocks.append((block_start, body_end))
+        heading_starts = {begin for begin, _ in protected_blocks}
         start = 0
         chunks: list[tuple[str, int, int]] = []
 
@@ -500,7 +544,17 @@ class RagStore:
                     split_match = split_window_start + index + len(pattern)
                     break
 
-            end = split_match or target_end
+            end = length if target_end == length else split_match or target_end
+            boundaries = [begin for begin in heading_starts
+                          if target_end < length and split_window_start <= begin <= min(end, split_window_end)]
+            if boundaries:
+                end = max(boundaries)
+            for begin, block_end in protected_blocks:
+                if begin < end < block_end:
+                    if begin > start:
+                        end = begin
+                    elif block_end - start <= max_chunk_size:
+                        end = block_end
             if end <= start:
                 end = target_end
 
@@ -510,7 +564,16 @@ class RagStore:
 
             if end >= length:
                 break
-            start = max(end - overlap, start + 1)
+            next_start = max(end - overlap, start + 1)
+            if end in heading_starts:
+                # Do not let overlap pull the next chunk back across a section boundary.
+                next_start = end
+            else:
+                for begin, block_end in protected_blocks:
+                    if begin < next_start < block_end:
+                        next_start = begin if begin > start else end
+                        break
+            start = next_start
 
         return chunks
 

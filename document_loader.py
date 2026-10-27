@@ -281,40 +281,137 @@ def _read_pdf_with_ocr(path: Path, text_pages: list[str]) -> tuple[str, dict[str
 def _read_docx(path: Path, ocr_enabled: bool = False) -> tuple[str, dict[str, Any]]:
     try:
         from docx import Document as DocxDocument
+        from docx.oxml.ns import qn
+        from docx.text.paragraph import Paragraph
     except ImportError as exc:
         raise RuntimeError("Reading .docx files requires the optional dependency 'python-docx'.") from exc
     document = DocxDocument(str(path))
-    paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
-
+    use_ocr = ocr_enabled and is_ocr_available()
     ocr_image_count = 0
-    if ocr_enabled and is_ocr_available():
-        paragraphs = []
-        blip_tag = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
-        for paragraph in document.paragraphs:
-            if paragraph.text.strip():
-                paragraphs.append(paragraph.text)
-            for blip in paragraph._element.findall(f".//{blip_tag}"):
-                relationship_id = blip.get(
-                    "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
-                )
-                if not relationship_id:
-                    continue
-                try:
-                    image_part = document.part.related_parts[relationship_id]
-                    ocr_text = _ocr_image_bytes(image_part.blob)
-                except Exception as exc:
-                    logger.warning("Embedded-image OCR failed in %s: %s", path, exc)
-                    continue
-                if ocr_text:
-                    ocr_image_count += 1
-                    paragraphs.append(f"[Image OCR]: {ocr_text}")
-        # Note: images embedded directly inside table cells are not walked here.
+    mc = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+    w14 = "{http://schemas.microsoft.com/office/word/2010/wordml}"
+    supported_choice_namespaces = {
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+        "http://schemas.microsoft.com/office/word/2010/wordml",
+        "http://schemas.openxmlformats.org/drawingml/2006/main",
+        "http://schemas.openxmlformats.org/drawingml/2006/picture",
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "urn:schemas-microsoft-com:vml",
+    }
 
-    for table in document.tables:
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-            if cells:
-                paragraphs.append(" | ".join(cells))
+    def heading_level(element: Any) -> int | None:
+        properties = element.find(qn("w:pPr"))
+        outline = properties.find(qn("w:outlineLvl")) if properties is not None else None
+        if outline is not None:
+            value = outline.get(qn("w:val"), "")
+            return min(int(value) + 1, 6) if value.isdigit() and int(value) < 9 else None
+        style = Paragraph(element, document).style
+        seen: set[str] = set()
+        while style is not None and style.style_id not in seen:
+            seen.add(style.style_id)
+            if style.style_id == "Title":
+                return 1
+            properties = style.element.find(qn("w:pPr"))
+            outline = properties.find(qn("w:outlineLvl")) if properties is not None else None
+            if outline is not None:
+                value = outline.get(qn("w:val"), "")
+                return min(int(value) + 1, 6) if value.isdigit() and int(value) < 9 else None
+            style = style.base_style
+        return None
+
+    def checkbox_state(element: Any, tag: str, attribute: str) -> str:
+        checked = element.find(tag)
+        value = checked.get(attribute, "1") if checked is not None else "0"
+        return "[ ]" if value.lower() in {"0", "false", "off"} else "[x]"
+
+    def render(element: Any, part: Any) -> str:
+        nonlocal ocr_image_count
+        tag = element.tag
+        if tag in {qn("w:pPr"), qn("w:rPr"), qn("w:tblPr"), qn("w:trPr"),
+                   qn("w:tcPr"), qn("w:sdtPr"), qn("w:del"), qn("w:moveFrom"),
+                   qn("w:instrText"), qn("w:delText")}:
+            return ""
+        if tag == mc + "AlternateContent":
+            # Modern drawings often have a VML copy: consume exactly one branch.
+            for choice in element.findall(mc + "Choice"):
+                required = choice.get("Requires", "").split()
+                if required and all(choice.nsmap.get(prefix) in supported_choice_namespaces for prefix in required):
+                    return render(choice, part)
+            fallback = element.find(mc + "Fallback")
+            if fallback is not None:
+                return render(fallback, part)
+            logger.warning("No supported DOCX alternate-content branch in %s", path)
+            return ""
+        if tag in {qn("w:t"), qn("a:t")}:
+            return element.text or ""
+        if tag == qn("w:tab"):
+            return "\t"
+        if tag in {qn("w:br"), qn("w:cr")}:
+            return "\n"
+        if tag == qn("w:noBreakHyphen"):
+            return "-"
+        if tag == qn("w:checkBox"):
+            checked = element.find(qn("w:checked"))
+            state_tag = "w:checked" if checked is not None else "w:default"
+            return checkbox_state(element, qn(state_tag), qn("w:val")) + " "
+        if tag == qn("a:blip") and use_ocr:
+            relationship_id = element.get(qn("r:embed"))
+            if not relationship_id:
+                return ""
+            try:
+                image_part = part.related_parts[relationship_id]
+                ocr_text = _ocr_image_bytes(image_part.blob)
+            except Exception as exc:
+                logger.warning("Embedded-image OCR failed in %s: %s", path, exc)
+                return ""
+            if ocr_text:
+                ocr_image_count += 1
+                return f"\n\n[Image OCR]: {ocr_text}\n\n"
+            return ""
+        if tag == qn("w:sdt"):
+            content = element.find(qn("w:sdtContent"))
+            text = render(content, part) if content is not None else ""
+            checkbox = element.find(f"{qn('w:sdtPr')}/{w14}checkbox")
+            if checkbox is not None:
+                # Word usually stores a display glyph as well as the state.
+                state = checkbox_state(checkbox, w14 + "checked", w14 + "val")
+                text = re.sub("[\u2610\u2611\u2612]", "", text)
+                return state + " " + text.lstrip()
+            return text
+        if tag == qn("w:tr"):
+            cells = [render(child, part).strip() for child in element
+                     if child.tag != qn("w:trPr")]
+            return (" | ".join(cells) + "\n\n") if any(cells) else ""
+        text = "".join(render(child, part) for child in element)
+        if tag in {qn("w:p"), qn("a:p")}:
+            text = text.strip()
+            if not text:
+                return ""
+            level = heading_level(element) if tag == qn("w:p") else None
+            if level is not None:
+                text = "#" * level + " " + text
+            return text + "\n\n"
+        if tag == qn("w:tc"):
+            return text.strip()
+        if tag == qn("w:txbxContent") and text.strip():
+            return "\n\n" + text
+        return text
+
+    parts = [render(document.element.body, document.part).strip()]
+    # Linked sections share header/footer parts; visit each relationship only once.
+    seen_parts: set[str] = set()
+    for relationship in document.part.rels.values():
+        if relationship.reltype.rsplit("/", 1)[-1] not in {"header", "footer"} or relationship.is_external:
+            continue
+        part = relationship.target_part
+        if str(part.partname) in seen_parts:
+            continue
+        seen_parts.add(str(part.partname))
+        text = render(part.element, part).strip()
+        if text:
+            label = relationship.reltype.rsplit("/", 1)[-1].title()
+            parts.append(f"# {label}\n\n{text}")
 
     metadata: dict[str, Any] = {}
     if ocr_image_count:
@@ -324,7 +421,7 @@ def _read_docx(path: Path, ocr_enabled: bool = False) -> tuple[str, dict[str, An
             "ocr_language": config.OCR_LANGUAGE,
             "ocr_image_count": ocr_image_count,
         }
-    return "\n".join(paragraphs), metadata
+    return "\n\n".join(parts), metadata
 
 
 def _read_doc(path: Path) -> str:
