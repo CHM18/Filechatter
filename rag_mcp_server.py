@@ -108,9 +108,22 @@ def _call(tool_name: str, arguments: dict[str, Any], timeout: int = DEFAULT_TIME
     return payload.get("result", payload)
 
 
-def search_documents(query: str, collection_name: str = "all") -> Any:
+def search_documents(query: str, collection_name: str = "all", source: str | None = None) -> Any:
     """Search the local RAG index and return the most relevant chunks."""
-    return _call("search_documents", {"query": query, "collection_name": collection_name})
+    return _call(
+        "search_documents",
+        {"query": query, "collection_name": collection_name, "source": source},
+    )
+
+
+def read_document(
+    source: str, collection_name: str = "all", offset: int = 0, limit: int = 20
+) -> Any:
+    """Read indexed chunks in document order; continue with next_offset until has_more is false."""
+    return _call(
+        "read_document",
+        {"source": source, "collection_name": collection_name, "offset": offset, "limit": limit},
+    )
 
 
 def list_sources(collection_name: str = "all") -> Any:
@@ -172,6 +185,7 @@ def clear_index(confirm: bool = False, collection_name: str = "all", source: str
 # on the server's permission settings (denied tools stay invisible).
 ALL_TOOLS = {
     "search_documents": search_documents,
+    "read_document": read_document,
     "list_sources": list_sources,
     "get_document_support": get_document_support,
     "ingest_file": ingest_file,

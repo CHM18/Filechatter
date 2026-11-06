@@ -24,6 +24,7 @@ class TestRegistry:
         specs = {spec.name: spec for spec in tool_registry.list_specs()}
         assert set(specs) == {
             "search_documents",
+            "read_document",
             "list_sources",
             "get_document_support",
             "get_ingest_status",
@@ -75,6 +76,52 @@ class TestIngestFile:
         assert listing["total_chunks"] >= 1
         assert listing["summary"].startswith("1 document")
         assert len(listing["sources"]) == 1
+
+    def test_scoped_search_and_paginated_document_read(self, data_env):
+        runtime.collections().create("manuals")
+        store = runtime.collections().selected_stores("manuals")[0]
+        store.add_documents(
+            ["Unrelated template content.", "Development output is verified.", "Approval records are retained."],
+            [
+                {"source": "forms/template.pdf", "filename": "template.pdf"},
+                {"source": "SOP 7300.pdf", "filename": "SOP 7300.pdf"},
+                {"source": "SOP 7300.pdf", "filename": "SOP 7300.pdf"},
+            ],
+        )
+        store._semantic_candidates = lambda _query, source=None: []
+
+        hits = tool_registry.execute(
+            "search_documents",
+            {"query": "Development output", "collection_name": "manuals", "source": "SOP 7300.pdf"},
+        )
+        assert hits
+        assert {hit["source"] for hit in hits} == {"SOP 7300.pdf"}
+
+        first = tool_registry.execute(
+            "read_document", {"source": "SOP 7300.pdf", "collection_name": "manuals", "limit": 1}
+        )
+        second = tool_registry.execute(
+            "read_document",
+            {
+                "source": "SOP 7300.pdf",
+                "collection_name": "manuals",
+                "offset": first["next_offset"],
+                "limit": 1,
+            },
+        )
+        assert first["total_chunks"] == 2
+        assert first["chunks"][0]["content"] == "Development output is verified."
+        assert first["has_more"] is True
+        assert second["chunks"][0]["content"] == "Approval records are retained."
+        assert second["has_more"] is False
+
+        runtime.collections().create("archive")
+        runtime.collections().selected_stores("archive")[0].add_documents(
+            ["Archived copy."], [{"source": "SOP 7300.pdf", "filename": "SOP 7300.pdf"}]
+        )
+        ambiguous = tool_registry.execute("read_document", {"source": "SOP 7300.pdf"})
+        assert ambiguous["status"] == "ambiguous"
+        assert {item["collection_name"] for item in ambiguous["matches"]} == {"archive", "manuals"}
 
     def test_updates_last_updated(self, data_env, tmp_path):
         source = tmp_path / "stamp.txt"
