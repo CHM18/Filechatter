@@ -1,6 +1,34 @@
 from __future__ import annotations
 
+import pytest
+
+import config
 from rag_store import RagStore
+
+
+@pytest.mark.parametrize("channel", ["semantic", "keyword"])
+def test_source_filter_precedes_candidate_limit(data_env, monkeypatch, channel):
+    store = RagStore("source-filter")
+    query = "Development output verification"
+    store.add_documents(
+        [query] * 20 + ["Contents and introduction.", query],
+        [{"source": f"forms/form-{index}.pdf"} for index in range(20)]
+        + [{"source": "sops/SOP 7300.pdf"}] * 2,
+    )
+    monkeypatch.setattr(config, "RETRIEVAL_K", 1)
+    monkeypatch.setattr(config, "KEYWORD_RETRIEVAL_K", 1)
+    store.semantic_weight = 1.0 if channel == "semantic" else 0.0
+    store.keyword_weight = 1.0 if channel == "keyword" else 0.0
+    store.metadata_weight = 0.0
+
+    for source in ["sops/SOP 7300.pdf", "sop 7300.PDF"]:
+        results = store.search(query, source=source)
+        assert len(results) == 1
+        assert results[0].source == "sops/SOP 7300.pdf"
+        assert results[0].content == query
+    assert store.search(query, source="missing.pdf") == []
+    store.read_allowed = False
+    assert store.search(query, source="SOP 7300.pdf") == []
 
 
 def test_source_path_matches_outrank_generic_content_matches(data_env, monkeypatch):

@@ -33,6 +33,7 @@ COLLECTION_TOOLS = "collection_tools"
 
 TOOL_GROUPS = {
     "search_documents": READ_TOOLS,
+    "read_document": READ_TOOLS,
     "list_sources": READ_TOOLS,
     "get_document_support": READ_TOOLS,
     "ingest_file": INGEST_TOOLS,

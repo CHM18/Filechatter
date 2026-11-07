@@ -55,7 +55,11 @@ class TestBuildTools:
         tools, plan = chat_agent.build_chat_tools(["docs"], [], perms)
         search = next(t for t in tools if t["function"]["name"] == "search_documents")
         assert search["function"]["parameters"]["properties"]["collection_name"]["enum"] == ["docs"]
+        assert "source" in search["function"]["parameters"]["properties"]
         assert plan["search_documents"] == "read"
+        reader = next(t for t in tools if t["function"]["name"] == "read_document")
+        assert reader["function"]["parameters"]["properties"]["collection_name"]["enum"] == ["docs"]
+        assert plan["read_document"] == "read"
 
     def test_write_tools_hidden_without_write_db(self, data_env):
         perms = runtime.settings().get()["permissions"]
@@ -64,6 +68,7 @@ class TestBuildTools:
         assert "clear_index" in names
         assert "create_collection" in names
         assert "search_documents" in names
+        assert "read_document" in names
 
     def test_single_write_db_autofills(self, data_env):
         runtime.collections().create("docs")

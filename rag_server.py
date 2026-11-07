@@ -100,12 +100,14 @@ async def no_cache_ui_assets(request, call_next):
     return response
 
 
-def _search_results(question: str, collection_name: str) -> list[SearchResult]:
+def _search_results(
+    question: str, collection_name: str, source: str | None = None
+) -> list[SearchResult]:
     manager = runtime.collections()
     results = [
         result
         for store in manager.selected_stores(collection_name)
-        for result in store.search(question)
+        for result in store.search(question, source=source)
     ]
     return sorted(results, key=lambda result: (-result.score, result.collection_name, result.source, result.chunk_id))
 
@@ -155,6 +157,7 @@ class QueryRequest(BaseModel):
     question: str
     include_context: bool = True
     collection_name: str = "all"
+    source: str | None = None
 
 
 class DocumentUpload(BaseModel):
@@ -687,7 +690,10 @@ async def chat_cancel(request: ChatCancelRequest):
 @app.post("/search", response_model=SearchResponse)
 async def search(request: QueryRequest):
     """Retrieve relevant chunks without invoking the LLM."""
-    results = _search_results(request.question, request.collection_name) if request.include_context else []
+    results = (
+        _search_results(request.question, request.collection_name, request.source)
+        if request.include_context else []
+    )
     return SearchResponse(
         question=request.question,
         results=[_serialize_result(result) for result in results],
@@ -695,7 +701,10 @@ async def search(request: QueryRequest):
 
 
 def _run_grounded_chat(request: QueryRequest) -> tuple[str, str, dict[str, Any], list[SearchResult]]:
-    retrieved_results = _search_results(request.question, request.collection_name) if request.include_context else []
+    retrieved_results = (
+        _search_results(request.question, request.collection_name, request.source)
+        if request.include_context else []
+    )
     retrieved_documents = [
         Document(
             page_content=result.content,
@@ -841,7 +850,7 @@ async def list_chunks(
 ):
     """List stored chunks for debugging indexed content."""
     try:
-        safe_limit = max(1, min(limit, 200))
+        safe_limit = max(1, min(limit, 1000))
         safe_offset = max(0, offset)
         manager = runtime.collections()
         normalized_collection = manager.normalize_name(collection_name)

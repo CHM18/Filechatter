@@ -390,23 +390,48 @@ class RagStore:
             collection_name=metadata.get("collection_name", self.collection_name),
         )
 
-    def _semantic_candidates(self, question: str) -> list[int]:
+    def _source_filter(self, source: str) -> tuple[str, list[str]]:
+        if not source.strip():
+            raise ValueError("source must be a non-empty indexed path or file name")
+        if "/" in source or "\\" in source:
+            return "source = ?", [source]
+        return (
+            "(source = ? OR source IN "
+            "(SELECT source FROM documents WHERE source_name = ? COLLATE NOCASE))",
+            [source, source],
+        )
+
+    def _semantic_candidates(self, question: str, source: str | None = None) -> list[int]:
+        search_index = self.index
+        row_ids = self._row_ids
+        if source is not None:
+            condition, params = self._source_filter(source)
+            rows = self._connection.execute(
+                f"SELECT id FROM chunks WHERE {condition}", params
+            ).fetchall()
+            allowed_ids = {row["id"] for row in rows}
+            positions = [position for position, chunk_id in enumerate(row_ids) if chunk_id in allowed_ids]
+            if not positions:
+                return []
+            row_ids = [row_ids[position] for position in positions]
+            search_index = faiss.IndexFlatIP(self.dimension)
+            search_index.add(self.index.reconstruct_batch(np.asarray(positions, dtype=np.int64)))
         query_embedding = self.embedding_model.encode(
             [question], normalize_embeddings=True
         )
-        candidate_count = min(config.RETRIEVAL_K, self.chunk_count)
-        scores, indices = self.index.search(
+        candidate_count = min(config.RETRIEVAL_K, len(row_ids))
+        scores, indices = search_index.search(
             np.asarray(query_embedding, dtype=np.float32), candidate_count
         )
 
         candidates: list[int] = []
         for faiss_index in indices[0]:
-            if faiss_index < 0 or faiss_index >= len(self._row_ids):
+            if faiss_index < 0 or faiss_index >= len(row_ids):
                 continue
-            candidates.append(self._row_ids[faiss_index])
+            candidates.append(row_ids[faiss_index])
         return candidates
 
-    def _keyword_candidates(self, question: str) -> tuple[list[int], list[int]]:
+    def _keyword_candidates(self, question: str, source: str | None = None) -> tuple[list[int], list[int]]:
         """Return body-text and source-path candidates separately.
 
         The source path contains filename and directory metadata, which is a
@@ -415,54 +440,63 @@ class RagStore:
         terms = _extract_terms(question)
         content_candidates: list[int] = []
         source_candidates: list[int] = []
+        source_filter = ""
+        source_params: list[str] = []
+        if source is not None:
+            condition, source_params = self._source_filter(source)
+            source_filter = f" AND {condition}"
 
         if terms:
             match_query = " OR ".join(f'"{term}"' for term in terms)
             content_rows = self._connection.execute(
-                """
+                f"""
                 SELECT rowid
                 FROM chunks_fts
                 WHERE chunks_fts MATCH 'content : (' || ? || ')'
+                {source_filter}
                 ORDER BY bm25(chunks_fts)
                 LIMIT ?
                 """,
-                (match_query, config.KEYWORD_RETRIEVAL_K),
+                (match_query, *source_params, config.KEYWORD_RETRIEVAL_K),
             ).fetchall()
             content_candidates.extend(row["rowid"] for row in content_rows)
             source_rows = self._connection.execute(
-                """
+                f"""
                 SELECT rowid
                 FROM chunks_fts
                 WHERE chunks_fts MATCH 'source : (' || ? || ')'
+                {source_filter}
                 ORDER BY bm25(chunks_fts)
                 LIMIT ?
                 """,
-                (match_query, config.KEYWORD_RETRIEVAL_K),
+                (match_query, *source_params, config.KEYWORD_RETRIEVAL_K),
             ).fetchall()
             source_candidates.extend(row["rowid"] for row in source_rows)
 
         phrase = question.strip()
         if phrase:
             content_rows = self._connection.execute(
-                """
+                f"""
                 SELECT id
                 FROM chunks
                 WHERE content LIKE ? COLLATE NOCASE
+                {source_filter}
                 ORDER BY source ASC, chunk_index ASC
                 LIMIT ?
                 """,
-                (f"%{phrase}%", config.KEYWORD_RETRIEVAL_K),
+                (f"%{phrase}%", *source_params, config.KEYWORD_RETRIEVAL_K),
             ).fetchall()
             content_candidates.extend(row["id"] for row in content_rows)
             source_rows = self._connection.execute(
-                """
+                f"""
                 SELECT id
                 FROM chunks
                 WHERE source LIKE ? COLLATE NOCASE
+                {source_filter}
                 ORDER BY source ASC, chunk_index ASC
                 LIMIT ?
                 """,
-                (f"%{phrase}%", config.KEYWORD_RETRIEVAL_K),
+                (f"%{phrase}%", *source_params, config.KEYWORD_RETRIEVAL_K),
             ).fetchall()
             source_candidates.extend(row["id"] for row in source_rows)
 
@@ -711,8 +745,10 @@ class RagStore:
                 "deleted_chunks": deleted_chunks,
             }
 
-    def search(self, question: str) -> list[SearchResult]:
+    def search(self, question: str, source: str | None = None) -> list[SearchResult]:
         with self._lock:
+            if source is not None:
+                self._source_filter(source)
             normalized_question = _normalize_text(question)
             if not self.read_allowed:
                 return []
@@ -726,9 +762,17 @@ class RagStore:
             metadata_candidates: list[int] = []
 
             if self.semantic_weight > 0:
-                semantic_candidates = self._semantic_candidates(normalized_question)
+                semantic_candidates = (
+                    self._semantic_candidates(normalized_question)
+                    if source is None else self._semantic_candidates(normalized_question, source=source)
+                )
             if self.keyword_weight > 0 or self.metadata_weight > 0:
-                keyword_candidates, metadata_candidates = self._keyword_candidates(normalized_question)
+                keyword_candidates, metadata_candidates = (
+                    self._keyword_candidates(normalized_question)
+                    if source is None else self._keyword_candidates(normalized_question, source=source)
+                )
+                if source is not None:
+                    metadata_candidates = []
 
             reciprocal_rank_offset = 60
             combined_scores: dict[int, float] = {}
@@ -851,15 +895,9 @@ class RagStore:
             params: list[Any] = []
 
             if source:
-                if "/" in source or "\\" in source:
-                    query += " WHERE source = ?"
-                    params.append(source)
-                else:
-                    query += (
-                        " WHERE source = ? OR source IN "
-                        "(SELECT source FROM documents WHERE source_name = ? COLLATE NOCASE)"
-                    )
-                    params.extend([source, source])
+                condition, source_params = self._source_filter(source)
+                query += f" WHERE {condition}"
+                params.extend(source_params)
 
             query += " ORDER BY source ASC, chunk_index ASC LIMIT ? OFFSET ?"
             params.extend([limit, offset])

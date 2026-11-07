@@ -278,8 +278,11 @@ def dump_chunks(
         None,
         help="Source path or file name to inspect; omit to inspect the first chunks across all sources"
     ),
-    limit: int = typer.Option(5, "--limit", "-n", help="Number of chunks to print"),
+    limit: int = typer.Option(1000, "--limit", "-n", help="Number of chunks to print"),
     offset: int = typer.Option(0, "--offset", help="Chunk offset for pagination"),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Write chunk text directly to a UTF-8 file (overwrites existing file)"
+    ),
     server: Optional[str] = typer.Option(
         None,
         "--server",
@@ -293,6 +296,17 @@ def dump_chunks(
     def print_chunks(chunks: list[dict]) -> None:
         if not chunks:
             console.print("[yellow]No chunks found for the requested source[/yellow]")
+            return
+
+        if output is not None:
+            try:
+                output.write_text(
+                    "\n-----------------------------\n".join(chunk["content"] for chunk in chunks) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                console.print(f"Cannot write output file: {exc}", markup=False, highlight=False)
+                raise typer.Exit(1)
             return
 
         for index, chunk in enumerate(chunks):
@@ -320,6 +334,8 @@ def dump_chunks(
         console.print("[yellow]Server does not expose /chunks yet; reading from local store instead[/yellow]")
     except requests.exceptions.ConnectionError:
         console.print("[yellow]Server unavailable; reading from local store instead[/yellow]")
+    except typer.Exit:
+        raise
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)

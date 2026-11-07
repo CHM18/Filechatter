@@ -83,7 +83,7 @@ Configure the endpoint in the Chat sidebar (provider, base URL, model) and press
 
 The Databases tab controls which tools the model and MCP hosts may call in three global buckets:
 
-- **Read tools** - `search_documents`, `list_sources`, and `get_document_support`
+- **Read tools** - `search_documents`, `read_document`, `list_sources`, and `get_document_support`
 - **Ingest tools** - `ingest_file`, `start_ingest_directory`, `get_ingest_status`, and `get_ingest_log`
 - **Collection administration** - `create_collection`, `clear_index`, and `delete_collection`
 
@@ -182,6 +182,7 @@ Add it to LM Studio in `mcp.json` as a local program. Example Windows configurat
 After that, LM Studio can use these tools during chat:
 
 - `search_documents`
+- `read_document`
 - `list_sources`
 - `get_document_support`
 - `ingest_file`
@@ -217,6 +218,8 @@ Recommended workflow for large ingests:
 - `last_ingested_at`: when the source was last written to the RAG index
 
 `list_sources` caps the returned `sources` list at `max_sources` (default 10, max 50) per collection, sorted alphabetically by name, since an index can contain thousands of documents. `total_documents`/`total_chunks` (single collection) or the per-collection `document_count`/`chunk_count` (in the `collections` breakdown for `collection_name="all"`) always report the real total, independent of the cap; `sources_shown`, `sources_omitted`, and a `truncated` flag say whether entries were left out, and the `summary` text spells this out too so the requesting LLM does not mistake the excerpt for the full source list.
+
+For focused retrieval, pass `source` to `search_documents` to limit semantic and keyword ranking to that indexed file. Use `read_document` when you need the document content in order rather than relevance-ranked excerpts: start at `offset=0`, then continue with its `next_offset` until `has_more` is false (`limit` defaults to 20 and is capped at 100). A filename matching multiple indexed documents returns an ambiguity response; use an exact source path and collection to select one.
 
 `clear_index` supports targeted and bulk deletes:
 
@@ -338,6 +341,14 @@ python -m cli dump-chunks "your-file.docx" --limit 3
 
 This prints the actual chunk text stored in the RAG index, which is useful when a document was uploaded but retrieval or summarization looks wrong. You can pass a file name (matched case-insensitively across collections) or the exact indexed source path. If multiple documents share a file name, use the full source path from `list-docs` to select one document.
 
+Use `-o` / `--output` to write directly to a UTF-8 file without shell redirection or terminal line wrapping:
+
+```powershell
+.venv_filechatter\Scripts\python.exe -m cli dump-chunks "your-file.docx" --limit 3 -o "C:\temp\chunks.txt"
+```
+
+The destination directory must already exist. An existing output file is overwritten when chunks are found; if no chunks are found, the file is left untouched. `--limit` defaults to 1000 chunks, and `--offset` still applies. The server accepts up to 1000 chunks per request. Direct file output avoids encoding mismatches caused by `>` or pipes in older PowerShell versions.
+
 #### Clear all documents:
 ```bash
 # On Windows
@@ -360,7 +371,7 @@ python -m cli clear --yes
 - `PUT /settings/permissions` - Replace the global tool-access bucket settings
 - `GET /llm/models` / `POST /llm/test` - List models / test the configured chat endpoint
 - `POST /chat/stream` - Built-in chat agent loop, streamed as Server-Sent Events
-- `POST /search` - Retrieve relevant chunks only; accepts `collection_name`
+- `POST /search` - Retrieve relevant chunks only; accepts `collection_name` and optional source path/name filter
 - `POST /chat` - Compatibility endpoint that queries LM Studio directly; accepts `collection_name`
 - `POST /upload` - Upload documents; accepts `collection_name`
 - `GET /documents` - List indexed sources and chunk counts; accepts `collection_name`

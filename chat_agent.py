@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 REPEATED_TOOL_CALL_LIMIT = 3
 
 # Read tools whose collection_name the agent scopes to the read selection.
-READ_SCOPED_TOOLS = {"search_documents", "list_sources"}
+READ_SCOPED_TOOLS = {"search_documents", "read_document", "list_sources"}
 
 
 def _tool_calls_needing_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

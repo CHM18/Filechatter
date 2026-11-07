@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+
+import pytest
 
 
 class TestHealth:
@@ -101,6 +104,95 @@ class TestChunkInspection:
         assert "chunk 0" not in result.output
         assert "╭" not in result.output
         assert "Error:" not in result.output
+
+    @pytest.mark.parametrize("arguments, expected_count", [([], 1000), (["--limit", "7"], 7)])
+    def test_cli_dump_limit_through_api(self, client, tmp_path, monkeypatch, arguments, expected_count):
+        from types import SimpleNamespace
+        from typer.testing import CliRunner
+
+        import cli
+        import rag_server
+
+        chunks = [
+            {
+                "id": index + 1,
+                "source": "example.pdf",
+                "content": f"Stored chunk {index}.",
+                "chunk_index": index,
+                "collection_name": "guides",
+            }
+            for index in range(1005)
+        ]
+        store = SimpleNamespace(get_chunks=lambda *, source, limit, offset: chunks[offset : offset + limit])
+        manager = rag_server.runtime.collections()
+        monkeypatch.setattr(manager, "selected_stores", lambda name: [store])
+        monkeypatch.setattr(
+            cli.requests, "get", lambda url, params, timeout: client.get("/chunks", params=params)
+        )
+        output = tmp_path / "chunks.txt"
+
+        result = CliRunner().invoke(
+            cli.app, ["dump-chunks", "example.pdf", "-o", str(output), *arguments]
+        )
+
+        assert result.exit_code == 0, result.output
+        text = output.read_text(encoding="utf-8")
+        assert text.count("Stored chunk ") == expected_count
+        assert f"Stored chunk {expected_count - 1}." in text
+        assert f"Stored chunk {expected_count}." not in text
+
+    @pytest.mark.parametrize("option", ["-o", "--output"])
+    @pytest.mark.parametrize("fallback", [False, True])
+    def test_cli_writes_utf8_file(self, tmp_path, monkeypatch, option, fallback):
+        from types import SimpleNamespace
+        from typer.testing import CliRunner
+
+        import cli
+
+        contents = ["Direct \u2013 calculation error\n" + "Long line " * 40, "\u00e4 \u2022 \u25b3 [x]"]
+        chunks = [{"content": content} for content in contents]
+        closed = []
+
+        def get_chunks(*args, **kwargs):
+            if fallback:
+                raise cli.requests.exceptions.ConnectionError()
+            return SimpleNamespace(
+                status_code=200,
+                raise_for_status=lambda: None,
+                json=lambda: {"chunks": chunks},
+            )
+
+        monkeypatch.setattr(cli.requests, "get", get_chunks)
+        monkeypatch.setattr(cli, "RagStore", lambda: SimpleNamespace(
+            get_chunks=lambda **kwargs: chunks,
+            close=lambda: closed.append(True),
+        ))
+        output = tmp_path / "chunk dump.txt"
+        output.write_text("Old contents", encoding="utf-8")
+
+        result = CliRunner().invoke(cli.app, ["dump-chunks", "example.docx", option, str(output)])
+
+        assert result.exit_code == 0, result.output
+        expected = "\n-----------------------------\n".join(contents) + "\n"
+        assert output.read_bytes() == expected.replace("\n", os.linesep).encode("utf-8")
+        assert "calculation error" not in result.output
+        assert closed == ([True] if fallback else [])
+
+    def test_cli_reports_output_write_failure(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        from typer.testing import CliRunner
+
+        import cli
+
+        monkeypatch.setattr(cli.requests, "get", lambda *args, **kwargs: SimpleNamespace(
+            status_code=200,
+            raise_for_status=lambda: None,
+            json=lambda: {"chunks": [{"content": "Stored text"}]},
+        ))
+        result = CliRunner().invoke(cli.app, ["dump-chunks", "example.docx", "-o", str(tmp_path)])
+
+        assert result.exit_code == 1
+        assert "Cannot write output file" in result.output
 
     def test_cli_empty_result_is_success(self, client, monkeypatch):
         from typer.testing import CliRunner
@@ -316,8 +408,9 @@ class TestToolsApi:
     def test_list_tools(self, client):
         payload = client.get("/tools").json()
         tools = {tool["name"]: tool for tool in payload["tools"]}
-        assert len(tools) == 10
+        assert len(tools) == 11
         assert tools["search_documents"]["access"] == "read"
+        assert tools["read_document"]["access"] == "read"
         assert tools["clear_index"]["access"] == "write"
         assert tools["ingest_file"]["params_schema"]["required"] == ["path"]
 

@@ -90,12 +90,14 @@ def execute(name: str, arguments: dict[str, Any] | None = None) -> Any:
 # ----------------------------------------------------------------------
 
 
-def search_documents(query: str, collection_name: str = "all") -> list[dict[str, Any]]:
+def search_documents(
+    query: str, collection_name: str = "all", source: str | None = None
+) -> list[dict[str, Any]]:
     manager = runtime.collections()
     results = [
         result
         for store in manager.selected_stores(collection_name)
-        for result in store.search(query)
+        for result in store.search(query, source=source)
     ]
     results.sort(key=lambda result: (-result.score, result.collection_name, result.source, result.chunk_id))
     return [
@@ -110,6 +112,68 @@ def search_documents(query: str, collection_name: str = "all") -> list[dict[str,
         }
         for result in results
     ]
+
+
+def read_document(
+    source: str,
+    collection_name: str = "all",
+    offset: int = 0,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Read indexed chunks in source order, returning a page and continuation offset."""
+    if not source.strip():
+        raise ValueError("source must be a non-empty indexed path or file name")
+    if offset < 0:
+        raise ValueError("offset must be zero or greater")
+    if limit < 1 or limit > 100:
+        raise ValueError("limit must be between 1 and 100")
+
+    manager = runtime.collections()
+    matches = []
+    for store in manager.selected_stores(collection_name):
+        if not store.read_allowed:
+            continue
+        for indexed in store.list_sources():
+            indexed_source = indexed["source"]
+            matches_source = (
+                indexed_source == source
+                if "/" in source or "\\" in source
+                else indexed_source == source
+                    or (indexed.get("source_name") or "").casefold() == source.casefold()
+            )
+            if matches_source:
+                matches.append((store, indexed_source, indexed["chunk_count"]))
+
+    if len(matches) > 1:
+        return {
+            "status": "ambiguous",
+            "source": source,
+            "message": "More than one indexed document matches; specify an exact source path and collection.",
+            "matches": [
+                {"source": indexed_source, "collection_name": store.collection_name}
+                for store, indexed_source, _ in matches
+            ],
+            "chunks": [],
+        }
+
+    if matches:
+        store, indexed_source, total_chunks = matches[0]
+        chunks = store.get_chunks(source=indexed_source, limit=limit, offset=offset)
+    else:
+        indexed_source = source
+        total_chunks = 0
+        chunks = []
+    next_offset = offset + len(chunks)
+    return {
+        "source": indexed_source,
+        "collection_name": manager.normalize_name(collection_name),
+        "offset": offset,
+        "limit": limit,
+        "total_chunks": total_chunks,
+        "chunks": chunks,
+        "next_offset": next_offset if next_offset < total_chunks else None,
+        "has_more": next_offset < total_chunks,
+    }
 
 
 def _compact_source(source: dict[str, Any]) -> dict[str, Any]:
@@ -447,7 +511,11 @@ _COLLECTION_PARAM = {
 _register(
     ToolSpec(
         name="search_documents",
-        description="Search the local RAG index and return the most relevant chunks.",
+        description=(
+            "Search the local RAG index and return the most relevant chunks. If source is supplied, "
+            "restrict retrieval to that indexed file path or file name; use this when searching within "
+            "a known document."
+        ),
         access=READ,
         handler=search_documents,
         params_schema={
@@ -455,8 +523,35 @@ _register(
             "properties": {
                 "query": {"type": "string", "description": "Search query."},
                 "collection_name": _COLLECTION_PARAM,
+                "source": {
+                    "type": "string",
+                    "description": "Optional indexed source path or file name to restrict search to.",
+                },
             },
             "required": ["query"],
+        },
+    )
+)
+
+_register(
+    ToolSpec(
+        name="read_document",
+        description=(
+            "Read all chunks of a known indexed document in document order, independent of relevance ranking. "
+            "Use list_sources to identify the exact source, then call this tool repeatedly with next_offset "
+            "until has_more is false. Use a specific collection when the same source exists in multiple databases."
+        ),
+        access=READ,
+        handler=read_document,
+        params_schema={
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "Exact indexed source path or file name."},
+                "collection_name": _COLLECTION_PARAM,
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+            },
+            "required": ["source"],
         },
     )
 )
