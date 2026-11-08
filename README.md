@@ -349,6 +349,28 @@ Use `-o` / `--output` to write directly to a UTF-8 file without shell redirectio
 
 The destination directory must already exist. An existing output file is overwritten when chunks are found; if no chunks are found, the file is left untouched. `--limit` defaults to 1000 chunks, and `--offset` still applies. The server accepts up to 1000 chunks per request. Direct file output avoids encoding mismatches caused by `>` or pipes in older PowerShell versions.
 
+#### Dump all stored information for a file:
+```bash
+# On Windows
+.venv_filechatter\Scripts\python.exe -m cli dump-all "your-photo.jpg" -o "C:\temp\photo-data.json"
+# On macOS/Linux
+python -m cli dump-all "your-photo.jpg" -o "photo-data.json"
+```
+
+`dump-all` returns JSON containing every stored chunk and its metadata, plus the indexed document records, across readable collections. Image metadata can include generated summaries and keywords, descriptions, and extracted EXIF tags and keywords, when present in the index. It does not read or export the original file, and it does not include internal search index vectors. The server must be running; `--server` selects a different server. As with `dump-chunks`, use a filename or exact indexed path; a filename may match multiple files. Without `-o`, JSON is printed to the terminal. The output file's directory must exist and an existing file is overwritten, including when there are no matches (the JSON then contains empty lists).
+
+#### Diagnose a search:
+
+Restart the Filechatter server after updating it, then run from the project root:
+
+```powershell
+.\.venv_filechatter\Scripts\python.exe tests\manual_search.py "ostern 2012 schnee" fotos2 -o suchergebnis.json
+```
+
+The script calls the server and writes UTF-8 JSON, overwriting an existing output file; the destination directory must exist. Without `-o` it prints JSON to the console. Use `all` instead of a collection name to search all readable collections, `--server` for another server, and `--source` to restrict the search to an indexed filename or exact path.
+
+`results` contains the normal search response with `semantic_rank`, `keyword_rank` (chunk text), and `path_rank` (the metadata-weighted path channel) added to each result. `collections` contains the effective weights and limits and all candidates from the same search, including candidates excluded by the context or per-source limits. Each candidate also has the three channel ranks, `combined_score`, `combined_rank`, and `selection`. A null channel rank means the chunk was not in that candidate list, not necessarily that it could not match outside the configured candidate limits. Ranks and context limits apply independently per collection; the normal results are then sorted across collections by score. The diagnostic does not change search ranking and includes indexed content and metadata, which may be sensitive.
+
 #### Clear all documents:
 ```bash
 # On Windows
@@ -372,9 +394,11 @@ python -m cli clear --yes
 - `GET /llm/models` / `POST /llm/test` - List models / test the configured chat endpoint
 - `POST /chat/stream` - Built-in chat agent loop, streamed as Server-Sent Events
 - `POST /search` - Retrieve relevant chunks only; accepts `collection_name` and optional source path/name filter
+- `POST /search/debug` - Run the same retrieval and return per-channel ranks and candidate selection diagnostics
 - `POST /chat` - Compatibility endpoint that queries LM Studio directly; accepts `collection_name`
 - `POST /upload` - Upload documents; accepts `collection_name`
 - `GET /documents` - List indexed sources and chunk counts; accepts `collection_name`
+- `GET /documents/inspect` - Inspect all stored document records and chunks for a required `source` path or filename; accepts `collection_name`
 - `GET /chunks` - Inspect stored chunks for debugging; accepts `collection_name`
 - `DELETE /documents` - Clear documents; accepts `collection_name`
 

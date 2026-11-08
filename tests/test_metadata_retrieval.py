@@ -82,3 +82,58 @@ def test_search_returns_no_results_when_all_retrieval_weights_are_zero(data_env)
     store.metadata_weight = 0.0
 
     assert store.search("turbine") == []
+
+
+def test_search_debug_reports_actual_ranks_and_selection(data_env, monkeypatch):
+    store = RagStore("debug-ranking")
+    store.add_documents(
+        ["snow winter", "easter " + "x" * 100, "snow spring", "other"],
+        [
+            {"source": "a.jpg", "image_capture_time": "2012"},
+            {"source": "b.jpg"},
+            {"source": "a.jpg", "file_changed_epoch": 1},
+            {"source": "c.jpg"},
+        ],
+    )
+    ids = {row["content"]: row["id"] for row in store._connection.execute("SELECT id, content FROM chunks")}
+    a, b, c, d = (ids[text] for text in ("snow winter", "easter " + "x" * 100, "snow spring", "other"))
+    monkeypatch.setattr(store, "_semantic_candidates", lambda question: [a, b, c, d])
+    monkeypatch.setattr(store, "_keyword_candidates", lambda question: ([b, a], [c, a]))
+    monkeypatch.setattr(config, "MAX_CONTEXT_CHARS", 20)
+    monkeypatch.setattr(config, "MAX_CHUNKS_PER_SOURCE", 1)
+    store.semantic_weight = store.keyword_weight = store.metadata_weight = 1.0
+
+    expected = store.search("easter 2012 snow")
+    actual, debug = store.search_debug("easter 2012 snow")
+
+    assert actual == expected
+    candidates = {item["chunk_id"]: item for item in debug["candidates"]}
+    assert candidates[a]["semantic_rank"] == 1
+    assert candidates[a]["keyword_rank"] == 2
+    assert candidates[a]["path_rank"] == 2
+    assert candidates[a]["combined_score"] == pytest.approx(1 / 61 + 1 / 62 + 1 / 62)
+    assert candidates[a]["combined_rank"] == 1
+    assert candidates[a]["selection"] == "selected"
+    assert candidates[a]["metadata"]["image_capture_time"] == "2012"
+    assert candidates[b]["selection"] == "context_budget"
+    assert candidates[c]["selection"] == "max_chunks_per_source"
+    assert candidates[d]["selection"] == "selected"
+    assert candidates[d]["keyword_rank"] is None
+    assert debug["weights"] == {"semantic": 1.0, "keyword": 1.0, "path": 1.0}
+
+
+def test_search_debug_reports_candidates_after_budget_exhaustion(data_env, monkeypatch):
+    store = RagStore("debug-exhausted")
+    store.add_documents(["abcdefghij", "second"], [{"source": "a"}, {"source": "b"}])
+    ids = [row["id"] for row in store._connection.execute("SELECT id FROM chunks ORDER BY id")]
+    monkeypatch.setattr(store, "_semantic_candidates", lambda question: ids)
+    store.keyword_weight = store.metadata_weight = 0.0
+    monkeypatch.setattr(config, "MAX_CONTEXT_CHARS", 4)
+
+    results, debug = store.search_debug("test")
+
+    assert results == store.search("test")
+    assert results[0].content == "abcd"
+    assert [candidate["selection"] for candidate in debug["candidates"]] == [
+        "selected_truncated", "not_evaluated_context_budget"
+    ]
