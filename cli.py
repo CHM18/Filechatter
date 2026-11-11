@@ -1,4 +1,5 @@
 """CLI for Filechatter RAG Server"""
+import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -347,6 +348,46 @@ def dump_chunks(
         store.close()
 
     print_chunks(chunks)
+
+
+@app.command()
+def dump_all(
+    source: str = typer.Argument(..., help="Indexed source path or file name to inspect"),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Write JSON directly to a UTF-8 file (overwrites existing file)"
+    ),
+    server: Optional[str] = typer.Option(
+        None, "--server", "-s", help="RAG server URL"
+    ),
+):
+    """Dump all stored document records, chunks and their metadata as JSON."""
+    if not source.strip():
+        console.print("Error: Source path or file name must not be empty.", markup=False)
+        raise typer.Exit(1)
+
+    url = get_server_url(server)
+    try:
+        response = requests.get(
+            f"{url}/documents/inspect", params={"source": source}, timeout=120
+        )
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.ConnectionError:
+        console.print(f"Error: Cannot connect to server at {url}", markup=False)
+        raise typer.Exit(1)
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        console.print(f"Error retrieving stored information: {exc}", markup=False, highlight=False)
+        raise typer.Exit(1)
+
+    text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    if output is not None:
+        try:
+            output.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            console.print(f"Cannot write output file: {exc}", markup=False, highlight=False)
+            raise typer.Exit(1)
+    else:
+        typer.echo(text, nl=False)
 
 
 @app.command()

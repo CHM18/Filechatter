@@ -700,6 +700,37 @@ async def search(request: QueryRequest):
     )
 
 
+@app.post("/search/debug")
+async def search_debug(request: QueryRequest):
+    """Run the normal search and expose the rank of each channel candidate."""
+    if not request.include_context:
+        raise HTTPException(status_code=400, detail="include_context must be true for search diagnostics.")
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="A search question is required.")
+    manager = runtime.collections()
+    collection_name = manager.normalize_name(request.collection_name)
+    if collection_name != "all":
+        entry = manager.get_entry(collection_name)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="Collection not found.")
+        if not entry.read_allowed:
+            raise HTTPException(status_code=403, detail="Collection is not readable.")
+    results: list[SearchResult] = []
+    collections: list[dict[str, Any]] = []
+    for store in manager.selected_stores(collection_name):
+        store_results, debug = store.search_debug(request.question, source=request.source)
+        results.extend(store_results)
+        collections.append(debug)
+    results.sort(key=lambda result: (-result.score, result.collection_name, result.source, result.chunk_id))
+    return {
+        "question": request.question,
+        "collection_name": collection_name,
+        "source": request.source,
+        "results": [_serialize_result(result) for result in results],
+        "collections": collections,
+    }
+
+
 def _run_grounded_chat(request: QueryRequest) -> tuple[str, str, dict[str, Any], list[SearchResult]]:
     retrieved_results = (
         _search_results(request.question, request.collection_name, request.source)
@@ -838,6 +869,41 @@ async def list_documents():
             "sources": _list_sources("all"),
         }
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/documents/inspect")
+async def inspect_document(source: str, collection_name: str = "all"):
+    """Return all persisted document records and chunks for a source."""
+    if not source.strip():
+        raise HTTPException(status_code=400, detail="A source path or filename is required.")
+
+    try:
+        manager = runtime.collections()
+        normalized_collection = manager.normalize_name(collection_name)
+        documents: list[dict[str, Any]] = []
+        chunks: list[dict[str, Any]] = []
+        page_size = 1000
+        for store in manager.selected_stores(normalized_collection):
+            documents.extend(store.get_document_records(source))
+            offset = 0
+            while True:
+                page = store.get_chunks(source=source, limit=page_size, offset=offset)
+                chunks.extend(page)
+                if len(page) < page_size:
+                    break
+                offset += len(page)
+
+        documents.sort(key=lambda item: (item["collection_name"], item["source"]))
+        chunks.sort(key=lambda item: (item["collection_name"], item["source"], item["chunk_index"], item["id"]))
+        return {
+            "source": source,
+            "collection_name": normalized_collection,
+            "documents": documents,
+            "chunks": chunks,
+        }
+    except Exception as e:
+        logger.exception("Document inspection failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 

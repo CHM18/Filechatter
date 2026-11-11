@@ -746,10 +746,38 @@ class RagStore:
             }
 
     def search(self, question: str, source: str | None = None) -> list[SearchResult]:
+        return self._search(question, source)
+
+    def search_debug(self, question: str, source: str | None = None) -> tuple[list[SearchResult], dict[str, Any]]:
+        """Run the normal search and collect its per-channel candidate ranks."""
+        debug: dict[str, Any] = {}
+        results = self._search(question, source, debug)
+        return results, debug
+
+    def _search(
+        self, question: str, source: str | None, debug: dict[str, Any] | None = None
+    ) -> list[SearchResult]:
         with self._lock:
             if source is not None:
                 self._source_filter(source)
             normalized_question = _normalize_text(question)
+            if debug is not None:
+                debug.update({
+                    "collection_name": self.collection_name,
+                    "weights": {
+                        "semantic": self.semantic_weight,
+                        "keyword": self.keyword_weight,
+                        "path": self.metadata_weight,
+                    },
+                    "limits": {
+                        "semantic_candidates": config.RETRIEVAL_K,
+                        "keyword_candidates_per_query": config.KEYWORD_RETRIEVAL_K,
+                        "max_context_chars": config.MAX_CONTEXT_CHARS,
+                        "max_chunks_per_source": config.MAX_CHUNKS_PER_SOURCE,
+                    },
+                    "reciprocal_rank_offset": 60,
+                    "candidates": [],
+                })
             if not self.read_allowed:
                 return []
             if not normalized_question or self.chunk_count == 0:
@@ -800,6 +828,36 @@ class RagStore:
                 )
             ]
 
+            debug_candidates: dict[int, dict[str, Any]] = {}
+            if debug is not None:
+                channel_ranks = {
+                    name: {chunk_id: rank for rank, chunk_id in enumerate(candidates, 1)}
+                    for name, candidates in (
+                        ("semantic", semantic_candidates),
+                        ("keyword", keyword_candidates),
+                        ("path", metadata_candidates),
+                    )
+                }
+                for rank, chunk_id in enumerate(ordered_chunk_ids, 1):
+                    row = self._connection.execute(
+                        "SELECT * FROM chunks WHERE id = ?", (chunk_id,)
+                    ).fetchone()
+                    ranks = {name: positions.get(chunk_id) for name, positions in channel_ranks.items()}
+                    candidate = {
+                        "chunk_id": chunk_id,
+                        "source": row["source"] if row is not None else None,
+                        "content": row["content"] if row is not None else None,
+                        "metadata": json.loads(row["metadata_json"]) if row is not None else None,
+                        "semantic_rank": ranks["semantic"],
+                        "keyword_rank": ranks["keyword"],
+                        "path_rank": ranks["path"],
+                        "combined_score": combined_scores[chunk_id],
+                        "combined_rank": rank,
+                        "selection": "not_evaluated_context_budget",
+                    }
+                    debug_candidates[chunk_id] = candidate
+                    debug["candidates"].append(candidate)
+
             results: list[SearchResult] = []
             budget_chars = 0
             seen_sources: dict[str, int] = {}
@@ -810,21 +868,31 @@ class RagStore:
                     (chunk_id,),
                 ).fetchone()
                 if row is None:
+                    if debug is not None:
+                        debug_candidates[chunk_id]["selection"] = "missing_chunk"
                     continue
 
                 source = row["source"]
                 source_hits = seen_sources.get(source, 0)
                 if source_hits >= config.MAX_CHUNKS_PER_SOURCE:
+                    if debug is not None:
+                        debug_candidates[chunk_id]["selection"] = "max_chunks_per_source"
                     continue
 
                 content = row["content"]
                 prospective_budget = budget_chars + len(content)
                 if results and prospective_budget > config.MAX_CONTEXT_CHARS:
+                    if debug is not None:
+                        debug_candidates[chunk_id]["selection"] = "context_budget"
                     continue
                 if not results and len(content) > config.MAX_CONTEXT_CHARS:
                     content = content[: config.MAX_CONTEXT_CHARS].rstrip()
                     prospective_budget = len(content)
 
+                if debug is not None:
+                    debug_candidates[chunk_id]["selection"] = (
+                        "selected_truncated" if content != row["content"] else "selected"
+                    )
                 results.append(
                     SearchResult(
                         chunk_id=chunk_id,
@@ -910,6 +978,18 @@ class RagStore:
                 chunk["collection_name"] = self.collection_name
                 chunks.append(chunk)
             return chunks
+
+    def get_document_records(self, source: str) -> list[dict[str, Any]]:
+        """Return persisted document records matching a source path or filename."""
+        condition, params = self._source_filter(source)
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT * FROM documents WHERE {condition} ORDER BY source ASC", params
+            ).fetchall()
+            return [
+                {**dict(row), "collection_name": self.collection_name}
+                for row in rows
+            ]
 
     def clear(self) -> None:
         with self._lock:

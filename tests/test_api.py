@@ -51,6 +51,166 @@ class TestFileTypesApi:
 
 
 class TestChunkInspection:
+    def test_dump_all_includes_persisted_image_data_and_document_records(self, client, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        import cli
+
+        source = "C:/photos/holiday.jpg"
+        image_metadata = {
+            "source": source,
+            "path": source,
+            "filename": "holiday.jpg",
+            "image_description": "Grüner See",
+            "image_summary": "A lake and mountains.",
+            "image_keywords": ["lake", "mountains"],
+            "image_exif": {"Model": "Camera X"},
+            "image_exif_keywords": ["Camera X"],
+            "file_changed_epoch": 1700000000,
+        }
+        response = client.post(
+            "/upload",
+            json={
+                "documents": ["Image analysis chunk."],
+                "metadata": [image_metadata],
+                "collection_name": "photos",
+            },
+        )
+        assert response.status_code == 200
+        monkeypatch.setattr(
+            cli.requests, "get", lambda url, params, timeout: client.get("/documents/inspect", params=params)
+        )
+
+        result = CliRunner().invoke(cli.app, ["dump-all", "HOLIDAY.JPG"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert len(data["documents"]) == 1
+        document = data["documents"][0]
+        assert document["source"] == source
+        assert document["source_name"] == "holiday.jpg"
+        assert document["file_changed_at"] == 1700000000
+        assert document["last_ingested_at"]
+        assert document["collection_name"] == "photos"
+        assert len(data["chunks"]) == 1
+        chunk = data["chunks"][0]
+        assert chunk["content"] == "Image analysis chunk."
+        for key in ("image_description", "image_summary", "image_keywords", "image_exif", "image_exif_keywords"):
+            assert chunk["metadata"][key] == image_metadata[key]
+
+        output = tmp_path / "dump.json"
+        result = CliRunner().invoke(cli.app, ["dump-all", source, "--output", str(output)])
+        assert result.exit_code == 0, result.output
+        assert result.output == ""
+        assert json.loads(output.read_text(encoding="utf-8"))["chunks"] == data["chunks"]
+        assert "Grüner See" in output.read_text(encoding="utf-8")
+
+    def test_document_inspection_pages_all_collections(self, client, monkeypatch):
+        import rag_server
+
+        class Store:
+            def __init__(self, collection):
+                self.collection_name = collection
+
+            def get_document_records(self, source):
+                return [{"source": source, "collection_name": self.collection_name}]
+
+            def get_chunks(self, *, source, limit, offset):
+                return [
+                    {"id": i, "source": source, "collection_name": self.collection_name, "chunk_index": i}
+                    for i in range(offset, min(offset + limit, 1001))
+                ]
+
+        manager = rag_server.runtime.collections()
+        monkeypatch.setattr(manager, "selected_stores", lambda name: [Store("a"), Store("b")])
+
+        response = client.get("/documents/inspect", params={"source": "image.jpg"})
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["documents"]) == 2
+        assert len(data["chunks"]) == 2002
+        assert [chunk["chunk_index"] for chunk in data["chunks"] if chunk["collection_name"] == "b"] == list(range(1001))
+
+    def test_document_inspection_filename_and_path_filter(self, client):
+        for source in ("C:/one/photo.jpg", "C:/two/photo.jpg"):
+            response = client.post("/upload", json={
+                "documents": [source],
+                "metadata": [{"source": source, "filename": "photo.jpg"}],
+                "collection_name": "photos",
+            })
+            assert response.status_code == 200
+
+        result = client.get("/documents/inspect", params={"source": "PHOTO.JPG"}).json()
+        assert {item["source"] for item in result["documents"]} == {"C:/one/photo.jpg", "C:/two/photo.jpg"}
+        assert {item["source"] for item in result["chunks"]} == {"C:/one/photo.jpg", "C:/two/photo.jpg"}
+        result = client.get("/documents/inspect", params={"source": "C:/one/photo.jpg"}).json()
+        assert [item["source"] for item in result["documents"]] == ["C:/one/photo.jpg"]
+        assert [item["source"] for item in result["chunks"]] == ["C:/one/photo.jpg"]
+        assert client.get("/documents/inspect", params={"source": " "}).status_code == 400
+        assert client.get("/documents/inspect", params={"source": "missing.jpg"}).json()["chunks"] == []
+
+    def test_dump_all_reports_failures(self, client, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        from typer.testing import CliRunner
+
+        import cli
+
+        def disconnected(*args, **kwargs):
+            raise cli.requests.exceptions.ConnectionError()
+
+        monkeypatch.setattr(cli.requests, "get", disconnected)
+        result = CliRunner().invoke(cli.app, ["dump-all", "photo.jpg"])
+        assert result.exit_code == 1
+        assert "Cannot connect to server" in result.output
+
+        def unavailable(*args, **kwargs):
+            def raise_error():
+                raise cli.requests.exceptions.HTTPError("404 Client Error")
+            return SimpleNamespace(raise_for_status=raise_error)
+
+        monkeypatch.setattr(cli.requests, "get", unavailable)
+        result = CliRunner().invoke(cli.app, ["dump-all", "photo.jpg"])
+        assert result.exit_code == 1
+        assert "404 Client Error" in result.output
+
+        monkeypatch.setattr(
+            cli.requests, "get", lambda url, params, timeout: client.get("/documents/inspect", params=params)
+        )
+        result = CliRunner().invoke(cli.app, ["dump-all", "missing.jpg"])
+        assert result.exit_code == 0
+        assert json.loads(result.output)["documents"] == []
+        assert json.loads(result.output)["chunks"] == []
+        result = CliRunner().invoke(cli.app, ["dump-all", "photo.jpg", "-o", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "Cannot write output file" in result.output
+    def test_debug_search_contains_normal_response_and_candidates(self, client):
+        response = client.post("/upload", json={
+            "documents": ["Ostern 2012 Schnee", "Ostern 2023 Sonne"],
+            "metadata": [{"source": "2012.jpg"}, {"source": "2023.jpg"}],
+            "collection_name": "photos",
+        })
+        assert response.status_code == 200
+        query = {"question": "ostern 2012 schnee", "collection_name": "photos"}
+        regular = client.post("/search", json=query)
+        debug = client.post("/search/debug", json=query)
+        assert debug.status_code == 200
+        data = debug.json()
+        assert data["results"] == regular.json()["results"]
+        assert len(data["collections"]) == 1
+        assert data["collections"][0]["collection_name"] == "photos"
+        candidates = data["collections"][0]["candidates"]
+        assert candidates
+        for result in data["results"]:
+            candidate = next(item for item in candidates if item["chunk_id"] == result["chunk_id"])
+            assert candidate["combined_rank"] == result["rank"]
+            assert candidate["combined_score"] == result["score"]
+            assert candidate["selection"].startswith("selected")
+        assert client.post("/search/debug", json={**query, "include_context": False}).status_code == 400
+        assert client.post("/search/debug", json={**query, "question": " "}).status_code == 400
+        assert client.post("/search/debug", json={**query, "collection_name": "missing"}).status_code == 404
+        client.patch("/collections/photos", json={"read_allowed": False})
+        assert client.post("/search/debug", json=query).status_code == 403
+
     def test_filename_lookup_and_exact_path_lookup(self, client):
         source = r"C:\docs\Snke Operating system 2-3 - Software User Guide.pdf"
         other_source = r"C:\other\Snke Operating system 2-3 - Software User Guide.pdf"
