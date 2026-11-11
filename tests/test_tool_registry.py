@@ -5,6 +5,8 @@ from time import sleep, time
 
 import pytest
 
+import document_loader
+import ingest_jobs
 import runtime
 import tool_registry
 
@@ -54,6 +56,62 @@ class TestRegistry:
 
 
 class TestIngestFile:
+    def test_scanned_pdf_produces_same_chunks_for_file_and_directory(self, data_env, tmp_path, monkeypatch):
+        import fitz
+
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        source = source_dir / "scan.pdf"
+        document = fitz.open()
+        try:
+            document.new_page()
+            document.save(str(source))
+        finally:
+            document.close()
+        monkeypatch.setattr(document_loader, "is_ocr_available", lambda: True)
+        monkeypatch.setattr(document_loader, "_ocr_image_bytes", lambda _data: "OCR extracted body text")
+        for collection in ("single", "directory"):
+            runtime.collections().create(collection, ocr_enabled=True)
+
+        result = tool_registry.ingest_file(str(source), "single")
+        start = tool_registry.start_ingest_directory(str(source_dir), collection_name="directory")
+        status = wait_for_job(start["job_id"])
+        single = runtime.collections().get_store("single").get_chunks(source=str(source.resolve()))
+        directory = runtime.collections().get_store("directory").get_chunks(source=str(source.resolve()))
+
+        assert result["documents_uploaded"] == 1
+        assert status["failed_files"] == 0
+        assert [chunk["content"] for chunk in single] == [chunk["content"] for chunk in directory]
+        assert "OCR extracted body text" in single[0]["content"]
+        assert single[0]["metadata"]["ocr_used"] is True
+        assert directory[0]["metadata"]["ocr_used"] is True
+
+    @pytest.mark.parametrize("collection_name", ["scans", "all"])
+    def test_single_file_and_directory_use_target_collection_ocr(self, data_env, tmp_path, monkeypatch, collection_name):
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        source = source_dir / "note.txt"
+        source.write_text("shared extraction content", encoding="utf-8")
+        target = "documentation" if collection_name == "all" else collection_name
+        runtime.collections().ensure(target)
+        runtime.collections().update_entry(target, ocr_enabled=True)
+        calls = []
+        original_loader = tool_registry.load_document
+
+        def capture(path, *, ocr_enabled=False):
+            calls.append(ocr_enabled)
+            return original_loader(path, ocr_enabled=ocr_enabled)
+
+        monkeypatch.setattr(tool_registry, "load_document", capture)
+        monkeypatch.setattr(ingest_jobs, "load_document", capture)
+        result = tool_registry.ingest_file(str(source), collection_name)
+        start = tool_registry.start_ingest_directory(str(source_dir), collection_name=collection_name)
+        status = wait_for_job(start["job_id"])
+
+        assert result["documents_uploaded"] == 1
+        assert status["failed_files"] == 0
+        assert calls == [True, True]
+
     def test_roundtrip_search(self, data_env, tmp_path):
         source = tmp_path / "note.txt"
         source.write_text("The Filechatter retriever stores document chunks persistently.", encoding="utf-8")

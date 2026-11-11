@@ -574,6 +574,10 @@ database, Filechatter will:
 - automatically fall back to OCR for PDF pages that have no extractable text layer (scanned PDFs)
 - OCR pictures embedded inside `.docx`/`.pptx`/`.xlsx` files
 
+The MCP single-file and directory ingestion tools use the target database's OCR setting,
+including the inferred database when `collection_name` is `all`. Enabling OCR does not
+automatically re-index previously ingested files; unchanged sources can be skipped.
+
 Unlike most Python packages in `requirements.txt`, the Tesseract OCR engine itself is a **system binary** and must be
 installed separately. Scanned-PDF OCR additionally needs the `pymupdf` package (imported as `fitz`), which is listed
 in `requirements.txt`:

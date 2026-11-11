@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import runtime
-from document_loader import get_document_support_status, load_document
+from document_loader import get_document_support_status, infer_collection_name, load_document
 
 logger = logging.getLogger(__name__)
 
@@ -342,29 +342,23 @@ def ingest_file(path: str, collection_name: str = "all") -> dict[str, Any]:
         raise ValueError(f"File not found: {file_path}")
 
     normalized = manager.normalize_name(collection_name)
-    loaded_document = load_document(file_path)
-
-    if normalized == "all":
-        # Auto-route via metadata inferred by the loader (documentation/code).
-        target_collection = str(loaded_document.metadata.get("collection_name", "documentation")).lower()
-    else:
-        entry = manager.ensure(normalized)
-        if not entry.write_allowed:
-            raise ValueError(f"Collection '{entry.name}' is not write-enabled")
+    target_collection = infer_collection_name(file_path) if normalized == "all" else normalized
+    entry = manager.ensure(target_collection)
+    if normalized != "all":
         if not entry.allows_extension(file_path.suffix):
             allowed = ", ".join(entry.allowed_extensions)
             raise ValueError(
                 f"Collection '{entry.name}' does not accept '{file_path.suffix}' files "
                 f"(allowed: {allowed})"
             )
-        target_collection = normalized
-        loaded_document.metadata["collection_name"] = target_collection
-        loaded_document.metadata["content_type"] = target_collection
+
+    if not entry.write_allowed:
+        raise ValueError(f"Collection '{entry.name}' is not write-enabled")
+    loaded_document = load_document(file_path, ocr_enabled=entry.ocr_enabled)
+    loaded_document.metadata["collection_name"] = target_collection
+    loaded_document.metadata["content_type"] = target_collection
 
     store = manager.get_store(target_collection)
-    target_entry = manager.get_entry(target_collection)
-    if target_entry is not None and not target_entry.write_allowed:
-        raise ValueError(f"Collection '{target_collection}' is not write-enabled")
     if not loaded_document.content.strip():
         return {
             "documents_uploaded": 0,

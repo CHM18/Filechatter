@@ -215,6 +215,11 @@ class IngestJobManager:
                     job.current_file = str(file_path)
 
                 try:
+                    entry = explicit_entry
+                    if entry is None:
+                        entry = self.collections.ensure(infer_collection_name(file_path))
+                    if not entry.write_allowed:
+                        raise ValueError(f"Collection '{entry.name}' is not write-enabled")
                     # Extension filter for an explicit target collection.
                     if explicit_entry is not None and not explicit_entry.allows_extension(file_path.suffix):
                         with self._lock:
@@ -247,7 +252,7 @@ class IngestJobManager:
 
                     loaded_document = load_document(
                         file_path,
-                        ocr_enabled=bool(explicit_entry.ocr_enabled) if explicit_entry is not None else False,
+                        ocr_enabled=bool(entry.ocr_enabled),
                     )
                     target_collection = job.collection_name
                     if target_collection == "all":
@@ -321,4 +326,3 @@ class IngestJobManager:
                 job.current_file = None
                 job.finished_at = time()
             self._start_next_queued()
-
