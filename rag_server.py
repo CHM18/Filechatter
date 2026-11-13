@@ -27,6 +27,8 @@ import config
 import permissions
 import runtime
 import tool_registry
+from document_loader import load_document
+from structured_extraction import file_sha256
 from collections_manager import CollectionLockedError
 from llm_providers import ProviderError, build_provider
 from memory_store import MEMORY_CATEGORIES, validate_memory
@@ -164,6 +166,13 @@ class DocumentUpload(BaseModel):
     documents: list[str]
     metadata: list[dict[str, Any]] | None = None
     collection_name: str = "all"
+
+
+class DocumentExtractionRequest(BaseModel):
+    path: str
+    collection_name: str
+    source_sha256: str
+    confirm: bool = False
 
 
 class RetrievedChunk(BaseModel):
@@ -803,6 +812,48 @@ async def chat_langchain(request: QueryRequest):
     except Exception as e:
         logger.error(f"Chat langchain error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/documents/extract")
+def extract_local_document(request: DocumentExtractionRequest):
+    """Extract a server-local file under the same authorization as ingest_file."""
+    try:
+        for tool in ("ingest_file", "read_document"):
+            decision = permissions.enforce(tool, client=permissions.CLIENT_API)
+            if decision == permissions.ASK and not request.confirm:
+                raise HTTPException(status_code=403, detail=f"{tool} requires confirmation")
+        manager = runtime.collections()
+        name = manager.normalize_name(request.collection_name)
+        if name == "all":
+            raise ValueError("Extraction requires a specific collection")
+        entry = manager.get_entry(name)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"Unknown collection: {name}")
+        if not entry.write_allowed or not entry.read_allowed:
+            raise HTTPException(status_code=403, detail=f"Collection '{name}' must be read- and write-enabled")
+        path = Path(request.path).expanduser()
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"Not a regular local file: {path}")
+        if not entry.allows_extension(path.suffix):
+            raise ValueError(f"Collection '{name}' does not accept '{path.suffix}' files")
+        if file_sha256(path) != request.source_sha256:
+            raise ValueError("Source changed after inventory; extraction rejected")
+        document = load_document(path, ocr_enabled=entry.ocr_enabled)
+        if document.metadata.get("source_sha256") != request.source_sha256:
+            raise ValueError("Source changed after inventory; extraction rejected")
+        document.metadata.update({"collection_name": name, "content_type": name})
+        return {
+            "content": document.content, "metadata": document.metadata,
+            "units": document.units, "pdf_pages": document.pdf_pages,
+            "dependencies": document.dependencies,
+        }
+    except permissions.PermissionDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, RuntimeError, OSError) as exc:
+        logger.warning("Local document extraction failed: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/upload")

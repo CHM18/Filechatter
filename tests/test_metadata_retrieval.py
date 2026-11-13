@@ -66,6 +66,32 @@ def test_analysis_state_and_force_replace(data_env):
     assert store.analysis_state("a.jpg") == (100.0, "fp2")
 
 
+def test_fingerprint_replacement_keeps_old_chunks_when_embedding_fails(data_env, monkeypatch):
+    store = RagStore("fingerprint-failure")
+    metadata = {"source": "a.pdf", "file_changed_epoch": 100.0, "extraction_fingerprint": "old"}
+    store.add_documents(["original content"], [metadata])
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("embedding unavailable")
+
+    monkeypatch.setattr(store.embedding_model, "encode", fail)
+    with pytest.raises(RuntimeError, match="embedding unavailable"):
+        store.add_documents(["new content"], [{**metadata, "extraction_fingerprint": "new"}])
+    assert [chunk["content"] for chunk in store.get_chunks("a.pdf")] == ["original content"]
+
+
+def test_fingerprints_keep_identical_and_reject_older_sources(data_env):
+    store = RagStore("fingerprint-order")
+    metadata = {"source": "a.pdf", "file_changed_epoch": 100.0, "extraction_fingerprint": "old"}
+    store.add_documents(["original"], [metadata])
+    unchanged = store.add_documents(["same"], [metadata])
+    older = store.add_documents(["older"], [{**metadata, "file_changed_epoch": 99.0,
+                                              "extraction_fingerprint": "new"}])
+    assert unchanged["skipped_outdated_documents"] == 1
+    assert older["skipped_outdated_documents"] == 1
+    assert store.get_chunks("a.pdf")[0]["content"] == "original"
+
+
 def test_search_returns_no_results_when_collection_is_not_readable(data_env):
     store = RagStore("read-disabled")
     store.add_documents(["A document about turbine maintenance."], [{"source": "doc.txt"}])

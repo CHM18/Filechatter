@@ -600,7 +600,60 @@ database, Filechatter will:
 
 The MCP single-file and directory ingestion tools use the target database's OCR setting,
 including the inferred database when `collection_name` is `all`. Enabling OCR does not
-automatically re-index previously ingested files; unchanged sources can be skipped.
+automatically re-index previously ingested files. Re-run ingestion to apply the new
+setting. For PDF, DOCX, XLSX, PPTX and image files, Filechatter fingerprints the source and OCR
+settings; a changed fingerprint replaces an existing source even when the file timestamp
+is unchanged. Older-timestamped sources remain protected against replacement. Other
+formats continue to use their existing skip rules. For PDFs and modern Office files,
+unavailable requested OCR or a failed OCR page/image is reported as an ingestion error
+rather than indexing partial output. PDFs with remaining empty/failed text units and
+Office files without body text are rejected instead of indexing a source header alone.
+
+### Shared extraction and Office body fallback
+
+MCP single-file ingestion, MCP directory ingestion and Windchill audit ingestion use
+the same Filechatter loader. For the same selected source, sibling files, collection
+OCR setting and extractor version, they index identical content and chunks; the audit
+adds its evidence metadata. Directory discovery and audit document selection remain
+different policies, so whole-directory source lists need not match.
+
+PDF extraction preserves physical page numbers, links, warnings and per-page OCR
+provenance. Warned or failed text layers are also candidates for whole-page OCR.
+If the effective PDF still has incomplete text, the loader looks for a unique
+same-folder modern Office companion: `Main.pdf` can use `Main_ATT1.docx`, `.xlsx`
+or `.pptx`; a PDF attachment requires the identical Office stem. Supplemental names,
+symlinks and legacy Office files are not fallback candidates. Multiple candidates
+block fallback rather than choosing arbitrarily.
+
+Fallback replaces the entire PDF body while retaining only recognized approval-cover
+pages. Office units retain their paragraph/table, worksheet/row or slide/shape
+locations, never invented PDF page numbers. This fallback is text-only: images and
+embedded objects are not interpreted, and encountered PowerPoint charts block it.
+Filename association is not proof of equivalent documents. Unreadable retained
+covers still block ingestion; successful but empty OCR is not proof of a blank page.
+Nonempty PDF text with extraction warnings remains reviewable evidence, not a
+completeness certification.
+
+`POST /documents/extract` returns canonical `content`, indexing `metadata`, effective
+`units`, physical `pdf_pages` and companion `dependencies`, without writing the index.
+It requires a specific existing collection, the expected `source_sha256`, permitted
+`ingest_file` **and** `read_document` operations, collection read/write access and an
+allowed source extension. `ask` permissions require `confirm: true`. Paths must exist
+on the server's local filesystem; this is not a file-transfer service. Treat this API
+with the same trust as other permitted local-file operations; do not expose it to
+untrusted clients.
+
+Extraction version 2 fingerprints include source and companion hashes, candidate
+sets, fallback policy, OCR configuration and reader package versions. Files and
+companions are checked for changes during extraction. Restart Filechatter after
+upgrading, then rerun ingestion to replace old extraction output. Audit snapshots
+also include these fingerprints and refuse reuse of a nonempty collection for a
+different snapshot.
+
+The private audit repository is not a runtime dependency of Filechatter. When it is
+present as the sibling `snke-qm-rag` checkout, run the real HTTP three-path parity suite
+with `python -m pytest tests\test_ingestion_parity.py`; otherwise that integration
+suite is skipped.
 
 Unlike most Python packages in `requirements.txt`, the Tesseract OCR engine itself is a **system binary** and must be
 installed separately. Scanned-PDF OCR additionally needs the `pymupdf` package (imported as `fitz`), which is listed

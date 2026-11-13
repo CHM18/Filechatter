@@ -23,6 +23,7 @@ import config
 from collections_manager import CollectionsManager
 from document_loader import (
     FILE_TYPE_CATEGORIES,
+    _file_sha256,
     discover_documents,
     image_analysis_fingerprint,
     infer_collection_name,
@@ -230,7 +231,8 @@ class IngestJobManager:
                         continue
 
                     force_replace = False
-                    if config.IMAGE_SKIP_ANALYZED and file_path.suffix.lower() in FILE_TYPE_CATEGORIES["Images"]:
+                    if (config.IMAGE_SKIP_ANALYZED and not entry.ocr_enabled
+                            and file_path.suffix.lower() in FILE_TYPE_CATEGORIES["Images"]):
                         probe_collection = job.collection_name
                         if probe_collection == "all":
                             probe_collection = infer_collection_name(file_path)
@@ -242,7 +244,10 @@ class IngestJobManager:
                             current_changed = file_path.stat().st_mtime
                             if stored_fingerprint != image_analysis_fingerprint():
                                 force_replace = True
-                            elif stored_changed is not None and current_changed <= stored_changed:
+                            elif (stored_changed is not None and current_changed <= stored_changed
+                                  and self.collections.get_store(probe_collection).indexed_source_sha256(
+                                      str(file_path.expanduser().resolve())
+                                  ) == _file_sha256(file_path)):
                                 with self._lock:
                                     job.skipped_unchanged += 1
                                     job.processed_files += 1

@@ -172,7 +172,8 @@ class TestOfficeReaders:
         assert loaded.content.count("[Image OCR]: Extracted picture text") == 2
         assert loaded.metadata["ocr_image_count"] == 2
         calls.clear()
-        assert "Image OCR" not in dl.load_document(path, ocr_enabled=False).content
+        with pytest.raises(ValueError, match="No extractable Office body"):
+            dl.load_document(path, ocr_enabled=False)
         assert calls == []
 
     def test_reads_xlsx(self, tmp_path):
@@ -534,6 +535,44 @@ class TestOCR:
         assert loaded.metadata["ocr_used"] is True
         assert loaded.metadata["extraction_method"] == "ocr"
 
+    def test_pdf_ocr_failure_reports_page_and_does_not_return_partial_content(self, tmp_path, monkeypatch):
+        import fitz
+
+        path = tmp_path / "scan.pdf"
+        document = fitz.open()
+        try:
+            document.new_page()
+            document.save(str(path))
+        finally:
+            document.close()
+        monkeypatch.setattr(dl, "is_ocr_available", lambda: True)
+
+        def fail(_data):
+            raise RuntimeError("language data missing")
+
+        monkeypatch.setattr(dl, "_ocr_image_bytes", fail)
+        with pytest.raises(RuntimeError, match=r"OCR failed on .* page 1: language data missing"):
+            dl.load_document(path, ocr_enabled=True)
+
+    def test_pdf_ocr_unavailable_is_an_explicit_failure(self, tmp_path, monkeypatch):
+        path = tmp_path / "scan.pdf"
+        path.write_bytes(b"fixture")
+        monkeypatch.setattr(dl, "is_ocr_available", lambda: False)
+        with pytest.raises(RuntimeError, match="OCR requested.*unavailable"):
+            dl.load_document(path, ocr_enabled=True)
+
+    def test_pdf_changed_during_extraction_is_rejected(self, tmp_path, monkeypatch):
+        path = tmp_path / "changing.pdf"
+        path.write_bytes(b"first version")
+
+        def mutate(_path):
+            path.write_bytes(b"second version")
+            return [{"page": 1, "text": "Some text", "links": []}]
+
+        monkeypatch.setattr(dl, "read_pdf_units", mutate)
+        with pytest.raises(RuntimeError, match="File changed during extraction"):
+            dl.load_document(path)
+
     def test_text_pdf_skips_ocr(self, tmp_path, monkeypatch):
         path = tmp_path / "digital.pdf"
         self._make_pdf_with_text(path, "This invoice already has a real embedded text layer.")
@@ -627,8 +666,8 @@ class TestOCR:
         monkeypatch.setattr(dl, "is_ocr_available", lambda: True)
         monkeypatch.setattr(dl, "_ocr_image_bytes", _boom)
 
-        loaded = dl.load_document(path, ocr_enabled=False)
-        assert loaded.metadata["ocr_used"] is False
+        with pytest.raises(ValueError, match="unassessed/failed text units"):
+            dl.load_document(path, ocr_enabled=False)
 
     def test_docx_embedded_image_ocr(self, tmp_path, monkeypatch):
         from docx import Document as DocxDocument

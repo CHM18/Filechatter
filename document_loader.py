@@ -19,14 +19,16 @@ import base64
 import hashlib
 import html as html_module
 import importlib.util
+from importlib.metadata import PackageNotFoundError, version
 import io
+import json
 import logging
 import re
 import shutil
 import warnings
 from urllib.parse import urlparse
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import sys
 from typing import Any
@@ -34,6 +36,9 @@ from typing import Any
 import requests
 
 import config
+from structured_extraction import (
+    EXTRACTION_VERSION, companion_paths, file_sha256, read_pdf_units, replace_pdf_body, render_units,
+)
 from exif_keywords import capture_datetime, derive_exif_keywords, gps_position, locate
 from xmp_iptc import dedupe_keywords, deduplicate_against, extract_xmp_iptc, normalize
 logger = logging.getLogger(__name__)
@@ -196,15 +201,6 @@ def _read_pdf(path: Path) -> str:
     return "\n\n".join((page.extract_text() or "") for page in reader.pages)
 
 
-def _read_pdf_pages(path: Path) -> list[str]:
-    try:
-        from pypdf import PdfReader
-    except ImportError as exc:
-        raise RuntimeError("Reading .pdf files requires the optional dependency 'pypdf'.") from exc
-    reader = PdfReader(str(path))
-    return [(page.extract_text() or "") for page in reader.pages]
-
-
 def _read_pdf_with_ocr(path: Path, text_pages: list[str]) -> tuple[str, dict[str, Any]]:
     """OCR pages that need it: fully rasterize pages with no usable text layer, and
     additionally OCR any embedded raster images on otherwise-text pages (e.g. a
@@ -218,10 +214,11 @@ def _read_pdf_with_ocr(path: Path, text_pages: list[str]) -> tuple[str, dict[str
     parts: list[str] = []
     ocr_pages = 0
     ocr_image_count = 0
-    seen_image_hashes: set[str] = set()
+    page_results: list[dict[str, Any]] = []
     document = fitz.open(str(path))
     try:
         for index, page in enumerate(document):
+            seen_image_hashes: set[str] = set()
             existing_text = text_pages[index] if index < len(text_pages) else ""
             if len(existing_text.strip()) < _MIN_TEXT_LAYER_CHARS:
                 # Likely a fully scanned page: OCR the whole rendered page. Cap the
@@ -235,11 +232,10 @@ def _read_pdf_with_ocr(path: Path, text_pages: list[str]) -> tuple[str, dict[str
                 try:
                     ocr_text = _ocr_image_bytes(pixmap.tobytes("png"))
                 except Exception as exc:
-                    logger.warning("OCR failed on %s page %d: %s", path, index + 1, exc)
-                    ocr_text = existing_text
-                else:
-                    ocr_pages += 1
+                    raise RuntimeError(f"OCR failed on {path} page {index + 1}: {exc}") from exc
+                ocr_pages += 1
                 parts.append(ocr_text)
+                page_results.append({"text": ocr_text, "extraction_method": "ocr", "ocr_used": True})
                 continue
 
             # Page already has a usable text layer; only OCR embedded raster
@@ -257,12 +253,17 @@ def _read_pdf_with_ocr(path: Path, text_pages: list[str]) -> tuple[str, dict[str
                     seen_image_hashes.add(image_hash)
                     ocr_text = _ocr_image_bytes(image_bytes)
                 except Exception as exc:
-                    logger.warning("Embedded-image OCR failed on %s page %d: %s", path, index + 1, exc)
-                    continue
+                    raise RuntimeError(
+                        f"Embedded-image OCR failed on {path} page {index + 1}: {exc}"
+                    ) from exc
                 if ocr_text:
                     ocr_image_count += 1
                     page_parts.append(f"[Image OCR]: {ocr_text}")
             parts.append("\n".join(page_parts))
+            page_results.append({
+                "text": parts[-1], "extraction_method": "mixed" if len(page_parts) > 1 else "pypdf_layout",
+                "ocr_used": len(page_parts) > 1,
+            })
     finally:
         document.close()
 
@@ -275,6 +276,7 @@ def _read_pdf_with_ocr(path: Path, text_pages: list[str]) -> tuple[str, dict[str
             "ocr_pages": ocr_pages,
             "ocr_image_count": ocr_image_count,
         }
+    metadata["page_results"] = page_results
     return "\n\n".join(parts), metadata
 
 
@@ -363,8 +365,7 @@ def _read_docx(path: Path, ocr_enabled: bool = False) -> tuple[str, dict[str, An
                 image_part = part.related_parts[relationship_id]
                 ocr_text = _ocr_image_bytes(image_part.blob)
             except Exception as exc:
-                logger.warning("Embedded-image OCR failed in %s: %s", path, exc)
-                return ""
+                raise RuntimeError(f"Embedded-image OCR failed in {path}: {exc}") from exc
             if ocr_text:
                 ocr_image_count += 1
                 return f"\n\n[Image OCR]: {ocr_text}\n\n"
@@ -472,8 +473,7 @@ def _read_xlsx(path: Path, ocr_enabled: bool = False) -> tuple[str, dict[str, An
                     try:
                         ocr_text = _ocr_image_bytes(image._data())
                     except Exception as exc:
-                        logger.warning("Embedded-image OCR failed in %s: %s", path, exc)
-                        continue
+                        raise RuntimeError(f"Embedded-image OCR failed in {path}: {exc}") from exc
                     if ocr_text:
                         ocr_image_count += 1
                         parts.append(f"[Image OCR @ row {row_index + 1}]: {ocr_text}")
@@ -483,8 +483,7 @@ def _read_xlsx(path: Path, ocr_enabled: bool = False) -> tuple[str, dict[str, An
                     try:
                         ocr_text = _ocr_image_bytes(image._data())
                     except Exception as exc:
-                        logger.warning("Embedded-image OCR failed in %s: %s", path, exc)
-                        continue
+                        raise RuntimeError(f"Embedded-image OCR failed in {path}: {exc}") from exc
                     if ocr_text:
                         ocr_image_count += 1
                         parts.append(f"[Image OCR]: {ocr_text}")
@@ -529,8 +528,7 @@ def _read_pptx(path: Path, ocr_enabled: bool = False) -> tuple[str, dict[str, An
                 try:
                     ocr_text = _ocr_image_bytes(shape.image.blob)
                 except Exception as exc:
-                    logger.warning("Embedded-image OCR failed in %s: %s", path, exc)
-                    continue
+                    raise RuntimeError(f"Embedded-image OCR failed in {path}: {exc}") from exc
                 if ocr_text:
                     ocr_image_count += 1
                     parts.append(f"[Image OCR]: {ocr_text}")
@@ -1052,6 +1050,9 @@ class LoadedDocument:
     path: Path
     content: str
     metadata: dict[str, Any]
+    units: list[dict[str, Any]] = field(default_factory=list)
+    pdf_pages: list[dict[str, Any]] = field(default_factory=list)
+    dependencies: list[dict[str, str]] = field(default_factory=list)
 
 
 def _extension_available(extension: str) -> bool:
@@ -1122,14 +1123,23 @@ def infer_collection_name(path: Path) -> str:
     return "documentation"
 
 
+def _file_sha256(path: Path) -> str:
+    return file_sha256(path)
+
+
 def load_document(path: Path, *, ocr_enabled: bool = False) -> LoadedDocument:
     resolved_path = path.expanduser().resolve()
     if not is_supported_file(resolved_path):
         raise ValueError(f"Unsupported file type: {resolved_path.suffix or '<none>'}")
 
     extension = resolved_path.suffix.lower()
+    fingerprinted = extension in {".pdf", ".docx", ".xlsx", ".pptx"} or extension in FILE_TYPE_CATEGORIES["Images"]
+    source_hash = _file_sha256(resolved_path) if fingerprinted else None
     extra_metadata: dict[str, Any] = {}
     use_ocr = ocr_enabled and is_ocr_available()
+    units: list[dict[str, Any]] = []
+    pdf_pages: list[dict[str, Any]] = []
+    dependencies: list[dict[str, str]] = []
 
     if extension in FILE_TYPE_CATEGORIES["Images"]:
         if use_ocr:
@@ -1139,13 +1149,45 @@ def load_document(path: Path, *, ocr_enabled: bool = False) -> LoadedDocument:
             if ocr_enabled:
                 extra_metadata["ocr_requested_but_unavailable"] = True
     elif extension == ".pdf":
-        text_pages = _read_pdf_pages(resolved_path)
-        if use_ocr:
-            body, extra_metadata = _read_pdf_with_ocr(resolved_path, text_pages)
-        else:
-            body = "\n\n".join(text_pages)
-        if ocr_enabled and not is_ocr_available():
-            extra_metadata["ocr_requested_but_unavailable"] = True
+        if ocr_enabled and not use_ocr:
+            raise RuntimeError(f"OCR requested for {resolved_path}, but Tesseract or pytesseract is unavailable")
+        try:
+            pdf_pages = read_pdf_units(resolved_path)
+        except Exception as exc:
+            logger.warning("PDF extraction failed for %s: %s", resolved_path, exc)
+            extra_metadata["pdf_extraction_error"] = str(exc)
+        units = [dict(page) for page in pdf_pages]
+        if use_ocr and units:
+            text_pages = ["" if page.get("error") or page.get("extraction_warnings") else page["text"]
+                          for page in units]
+            _, ocr_metadata = _read_pdf_with_ocr(resolved_path, text_pages)
+            for unit, result in zip(units, ocr_metadata.pop("page_results"), strict=True):
+                if result["ocr_used"]:
+                    unit["original_text"] = unit["text"]
+                    unit["ocr_language"] = config.OCR_LANGUAGE
+                unit.update(result)
+                if result["extraction_method"] == "ocr" and result["text"].strip():
+                    unit["original_extraction_warnings"] = unit.pop("extraction_warnings", [])
+                    if unit.get("error") and not unit["error"].startswith("Hyperlink extraction failed"):
+                        unit["original_error"] = unit.pop("error")
+            extra_metadata.update(ocr_metadata)
+        # Preserve physical PDF evidence separately from an Office replacement body.
+        pdf_pages = [dict(page) for page in units]
+        units, fallback, dependencies = replace_pdf_body(resolved_path, units)
+        if fallback:
+            extra_metadata["body_fallback"] = fallback
+            extra_metadata["extraction_method"] = "pypdf_cover_office_body"
+        extra_metadata.setdefault("extraction_method", "pypdf_layout")
+        failed = [unit for unit in units if unit.get("error") or not unit["text"].strip()]
+        if not units or failed:
+            locations = ", ".join(str(unit.get("source_location") or f"PDF page {unit['page']}")
+                                  for unit in failed)
+            raise ValueError(f"Document contains unassessed/failed text units: {resolved_path}: {locations}")
+        extra_metadata["extraction_warnings"] = [
+            {"page": unit.get("page"), "message": warning}
+            for unit in pdf_pages for warning in unit.get("extraction_warnings", [])
+        ]
+        body = render_units(units)
         content = (
             f"Source file: {resolved_path.name}\n"
             f"Source folder: {resolved_path.parent.name}\n"
@@ -1153,16 +1195,22 @@ def load_document(path: Path, *, ocr_enabled: bool = False) -> LoadedDocument:
             f"{body.strip()}"
         ).strip()
     elif extension in (".docx", ".xlsx", ".pptx"):
+        if ocr_enabled and not use_ocr:
+            raise RuntimeError(f"OCR requested for {resolved_path}, but Tesseract or pytesseract is unavailable")
         reader = {".docx": _read_docx, ".xlsx": _read_xlsx, ".pptx": _read_pptx}[extension]
         body, extra_metadata = reader(resolved_path, ocr_enabled=use_ocr)
-        if ocr_enabled and not is_ocr_available():
-            extra_metadata["ocr_requested_but_unavailable"] = True
+        extra_metadata.setdefault("extraction_method", "office")
+        if not body.strip():
+            raise ValueError(f"No extractable Office body text: {resolved_path}")
         content = (
             f"Source file: {resolved_path.name}\n"
             f"Source folder: {resolved_path.parent.name}\n"
             f"Full path: {resolved_path}\n\n"
             f"{body.strip()}"
         ).strip()
+        units = [{"page": None, "source_path": str(resolved_path),
+                  "source_location": extension[1:].upper() + " document", "text": body, "links": [],
+                  "ocr_used": extra_metadata.get("ocr_used", False)}]
     else:
         reader = READERS[extension]
         body = reader(resolved_path).strip()
@@ -1188,7 +1236,48 @@ def load_document(path: Path, *, ocr_enabled: bool = False) -> LoadedDocument:
     }
     metadata.update(extra_metadata)
     metadata.setdefault("ocr_used", False)
-    return LoadedDocument(path=resolved_path, content=content, metadata=metadata)
+    if source_hash is not None:
+        if _file_sha256(resolved_path) != source_hash:
+            raise RuntimeError(f"File changed during extraction: {resolved_path}")
+        settings = {
+            "version": EXTRACTION_VERSION,
+            "source_sha256": source_hash,
+            "ocr_enabled": ocr_enabled,
+            "ocr_available": use_ocr if ocr_enabled else False,
+            "ocr_language": config.OCR_LANGUAGE if ocr_enabled else None,
+            "fallback_policy": "unique_same_folder_attachment_replace_entire_body",
+            "dependencies": dependencies,
+            "ocr_command": str(getattr(config, "OCR_TESSERACT_CMD", "") or "") if ocr_enabled else None,
+        }
+        packages = {".pdf": "pypdf", ".docx": "python-docx", ".xlsx": "openpyxl", ".pptx": "python-pptx"}
+        used_packages = {packages[extension]} if extension in packages else {"Pillow"}
+        used_packages.update(packages[Path(item["path"]).suffix.lower()] for item in dependencies)
+        if use_ocr:
+            used_packages.update({"pytesseract", "Pillow"})
+            if extension == ".pdf":
+                used_packages.add("pymupdf")
+        versions = {}
+        for package in sorted(used_packages):
+            try:
+                versions[package] = version(package)
+            except PackageNotFoundError:
+                versions[package] = "not-installed"
+        settings["reader_versions"] = versions
+        if extension in FILE_TYPE_CATEGORIES["Images"] and not use_ocr:
+            settings["image_analysis_fingerprint"] = image_analysis_fingerprint()
+        metadata["source_sha256"] = source_hash
+        metadata["extraction_version"] = EXTRACTION_VERSION
+        metadata["extraction_settings"] = settings
+        metadata["extraction_fingerprint"] = hashlib.sha256(
+            json.dumps(settings, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+    if extension == ".pdf":
+        current_dependencies = [{"path": str(other), "sha256": file_sha256(other)}
+                                for other in companion_paths(resolved_path)]
+        if current_dependencies != dependencies:
+            raise RuntimeError(f"Office companions changed during extraction: {resolved_path}")
+    return LoadedDocument(path=resolved_path, content=content, metadata=metadata, units=units,
+                          pdf_pages=pdf_pages, dependencies=dependencies)
 
 
 def discover_documents(directory: Path, recursive: bool = True) -> list[Path]:

@@ -56,6 +56,76 @@ class TestRegistry:
 
 
 class TestIngestFile:
+    @pytest.mark.parametrize("method", ["file", "directory"])
+    def test_changing_image_ocr_setting_reindexes_both_ways(self, data_env, tmp_path, monkeypatch, method):
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        source = source_dir / "image.png"
+        source.write_bytes(b"fixture")
+        monkeypatch.setattr(document_loader, "is_ocr_available", lambda: True)
+        monkeypatch.setattr(document_loader, "_read_image", lambda _path: (
+            "Image description", {"image_analysis_fingerprint": document_loader.image_analysis_fingerprint()}
+        ))
+        monkeypatch.setattr(document_loader, "_read_image_ocr", lambda _path: (
+            "OCR image text", {"ocr_used": True}
+        ))
+        runtime.collections().create("images")
+
+        def ingest():
+            if method == "file":
+                return tool_registry.ingest_file(str(source), "images")
+            start = tool_registry.start_ingest_directory(str(source_dir), collection_name="images")
+            status = wait_for_job(start["job_id"])
+            assert status["failed_files"] == 0
+            return status
+
+        ingest()
+        runtime.collections().update_entry("images", ocr_enabled=True)
+        ingest()
+        store = runtime.collections().get_store("images")
+        assert store.get_chunks(str(source.resolve()))[0]["content"] == "OCR image text"
+        runtime.collections().update_entry("images", ocr_enabled=False)
+        ingest()
+        assert store.get_chunks(str(source.resolve()))[0]["content"] == "Image description"
+        rows = store._connection.execute(
+            "SELECT chunks.content, chunks_fts.content FROM chunks "
+            "JOIN chunks_fts ON chunks.id = chunks_fts.rowid"
+        ).fetchall()
+        assert [(row[0], row[1]) for row in rows] == [("Image description", "Image description")]
+
+    @pytest.mark.parametrize("method", ["file", "directory"])
+    def test_enabling_ocr_reindexes_unchanged_pdf(self, data_env, tmp_path, monkeypatch, method):
+        import fitz
+
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        source = source_dir / "scan.pdf"
+        document = fitz.open()
+        try:
+            page = document.new_page()
+            page.insert_text((72, 72), "Thin")
+            document.save(str(source))
+        finally:
+            document.close()
+        monkeypatch.setattr(document_loader, "is_ocr_available", lambda: True)
+        monkeypatch.setattr(document_loader, "_ocr_image_bytes", lambda _data: "OCR recovered text")
+        runtime.collections().create("scans")
+        tool_registry.ingest_file(str(source), "scans")
+        runtime.collections().update_entry("scans", ocr_enabled=True)
+
+        if method == "file":
+            result = tool_registry.ingest_file(str(source), "scans")
+            assert result["replaced_documents"] == 1
+        else:
+            start = tool_registry.start_ingest_directory(str(source_dir), collection_name="scans")
+            status = wait_for_job(start["job_id"])
+            assert status["failed_files"] == 0
+            assert status["documents_uploaded"] == 1
+        chunks = runtime.collections().get_store("scans").get_chunks(source=str(source.resolve()))
+        assert "OCR recovered text" in chunks[0]["content"]
+        assert chunks[0]["metadata"]["ocr_used"] is True
+        assert chunks[0]["metadata"]["source_sha256"]
+
     def test_scanned_pdf_produces_same_chunks_for_file_and_directory(self, data_env, tmp_path, monkeypatch):
         import fitz
 

@@ -286,6 +286,14 @@ class RagStore:
         changed = _parse_timestamp(record["file_changed_at"]) if record is not None else None
         return changed, fingerprint
 
+    def indexed_source_sha256(self, source: str) -> str | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT metadata_json FROM chunks WHERE source = ? ORDER BY chunk_index LIMIT 1",
+                (source,),
+            ).fetchone()
+            return json.loads(row["metadata_json"]).get("source_sha256") if row else None
+
     def _extract_file_changed_timestamp(self, metadata: dict[str, Any]) -> float | None:
         for key in (
             "file_changed_epoch",
@@ -654,10 +662,19 @@ class RagStore:
                             skipped_outdated_sources.add(source)
                             continue
                         if existing_changed_ts is not None and file_changed_ts <= existing_changed_ts:
-                            skipped_outdated_sources.add(source)
-                            continue
+                            fingerprint = metadata.get("extraction_fingerprint")
+                            old_chunk = self._connection.execute(
+                                "SELECT metadata_json FROM chunks WHERE source = ? ORDER BY chunk_index LIMIT 1",
+                                (source,),
+                            ).fetchone()
+                            old_fingerprint = json.loads(old_chunk["metadata_json"]).get(
+                                "extraction_fingerprint"
+                            ) if old_chunk else None
+                            if (file_changed_ts < existing_changed_ts or not fingerprint
+                                    or fingerprint == old_fingerprint):
+                                skipped_outdated_sources.add(source)
+                                continue
 
-                    deleted_chunks += self._delete_chunks_for_source(source)
                     replaced_sources.add(source)
 
                 document_chunks = self._chunk_document(document)
@@ -697,10 +714,17 @@ class RagStore:
             if pending_rows:
                 embeddings = self.embedding_model.encode(pending_texts, normalize_embeddings=True)
                 embeddings_array = np.asarray(embeddings, dtype=np.float32)
+            else:
+                embeddings_array = None
 
-                previous_max_id = self._connection.execute(
-                    "SELECT COALESCE(MAX(id), 0) FROM chunks"
-                ).fetchone()[0]
+            for source in replaced_sources:
+                deleted_chunks += self._delete_chunks_for_source(source)
+
+            if pending_rows:
+                sequence = self._connection.execute(
+                    "SELECT seq FROM sqlite_sequence WHERE name = 'chunks'"
+                ).fetchone()
+                previous_max_id = int(sequence[0]) if sequence else 0
                 self._connection.executemany(
                     """
                     INSERT INTO chunks(source, content, metadata_json, chunk_index, start_char, end_char)
@@ -719,9 +743,6 @@ class RagStore:
                         for inserted_id, row in zip(inserted_ids, pending_rows)
                     ],
                 )
-            else:
-                embeddings_array = None
-
             for source, (metadata, changed_ts, ingested_at) in source_updates.items():
                 self._upsert_document_record(source, metadata, changed_ts, ingested_at)
 
