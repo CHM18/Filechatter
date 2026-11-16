@@ -22,7 +22,6 @@ const collectionsPanel = {
     [
       ["create-semantic-weight", "create-semantic-value"],
       ["create-keyword-weight", "create-keyword-value"],
-      ["create-metadata-weight", "create-metadata-value"],
     ].forEach(([rangeId, valueId]) => {
       const range = document.getElementById(rangeId);
       const output = document.getElementById(valueId);
@@ -119,6 +118,7 @@ const collectionsPanel = {
             <button class="btn btn-primary" data-save="${escapeHtml(collection.name)}">Apply</button>
           </div>
           <div class="weight-heading">Retrieval weights <span class="hint">0 = disabled, 10 = max</span></div>
+          <div class="hint">Search mode is configured globally on the server.</div>
           <div class="weight-editor">
             <label class="slider-row">
               <span>Semantic</span>
@@ -129,11 +129,6 @@ const collectionsPanel = {
               <span>Keyword</span>
               <input type="range" min="0" max="10" step="0.1" value="${Number(collection.keyword_weight ?? 2).toFixed(1)}" data-weight="keyword" data-name="${escapeHtml(collection.name)}" ${maybeRead && readReachable ? "" : "disabled"}>
               <b data-weight-value="keyword:${escapeHtml(collection.name)}">${Number(collection.keyword_weight ?? 2).toFixed(1)}</b>
-            </label>
-            <label class="slider-row">
-              <span>Metadata</span>
-              <input type="range" min="0" max="10" step="0.1" value="${Number(collection.metadata_weight ?? 4).toFixed(1)}" data-weight="metadata" data-name="${escapeHtml(collection.name)}" ${maybeRead && readReachable ? "" : "disabled"}>
-              <b data-weight-value="metadata:${escapeHtml(collection.name)}">${Number(collection.metadata_weight ?? 4).toFixed(1)}</b>
             </label>
           </div>
         </div>
@@ -161,7 +156,6 @@ const collectionsPanel = {
       write_allowed: collection.write_allowed === true,
       semantic_weight: Number(collection.semantic_weight ?? 1),
       keyword_weight: Number(collection.keyword_weight ?? 2),
-      metadata_weight: Number(collection.metadata_weight ?? 4),
       ocr_enabled: collection.ocr_enabled === true,
     };
   },
@@ -206,7 +200,6 @@ const collectionsPanel = {
       && left.write_allowed === right.write_allowed
       && left.semantic_weight === right.semantic_weight
       && left.keyword_weight === right.keyword_weight
-      && left.metadata_weight === right.metadata_weight
       && left.ocr_enabled === right.ocr_enabled;
   },
 
@@ -239,7 +232,6 @@ const collectionsPanel = {
       write_allowed: write.disabled ? stored.write_allowed : write.checked,
       semantic_weight: Number(card.querySelector('[data-weight="semantic"]').value),
       keyword_weight: Number(card.querySelector('[data-weight="keyword"]').value),
-      metadata_weight: Number(card.querySelector('[data-weight="metadata"]').value),
       ocr_enabled: ocr.disabled ? stored.ocr_enabled : ocr.checked,
     };
   },
@@ -300,10 +292,8 @@ const collectionsPanel = {
       : "(Tesseract OCR is not installed on the server)";
     document.getElementById("create-semantic-weight").value = "1.0";
     document.getElementById("create-keyword-weight").value = "2.0";
-    document.getElementById("create-metadata-weight").value = "4.0";
     document.getElementById("create-semantic-value").textContent = "1.0";
     document.getElementById("create-keyword-value").textContent = "2.0";
-    document.getElementById("create-metadata-value").textContent = "4.0";
     document.getElementById("create-error").textContent = "";
     document.getElementById("ext-advanced").checked = false;
     this.selectedExts = new Set();
@@ -393,7 +383,6 @@ const collectionsPanel = {
       write_allowed: document.getElementById("create-write-enabled").checked,
       semantic_weight: Number(document.getElementById("create-semantic-weight").value),
       keyword_weight: Number(document.getElementById("create-keyword-weight").value),
-      metadata_weight: Number(document.getElementById("create-metadata-weight").value),
       ocr_enabled: document.getElementById("create-ocr-enabled").checked,
     };
 

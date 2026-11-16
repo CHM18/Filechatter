@@ -21,6 +21,18 @@ def _csv_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false, got {value!r}")
+
+
 load_dotenv(BASE_DIR / ".env")
 
 # Set Sentence Transformers cache to local llmodels directory
@@ -89,6 +101,7 @@ CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "250"))
 CHUNK_SPLIT_MARGIN = int(os.getenv("CHUNK_SPLIT_MARGIN", "400"))
 RETRIEVAL_K = int(os.getenv("RETRIEVAL_K", "10"))
 KEYWORD_RETRIEVAL_K = int(os.getenv("KEYWORD_RETRIEVAL_K", "15"))
+LEGACY_METADATA_SEARCH = _bool_env("LEGACY_METADATA_SEARCH", False)
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "8000"))
 MAX_CHUNKS_PER_SOURCE = int(os.getenv("MAX_CHUNKS_PER_SOURCE", "4"))
 SEMANTIC_WEIGHT = float(os.getenv("SEMANTIC_WEIGHT", "1.0"))

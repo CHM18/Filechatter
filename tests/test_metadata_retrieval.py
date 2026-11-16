@@ -6,6 +6,11 @@ import config
 from rag_store import RagStore
 
 
+@pytest.fixture(autouse=True)
+def legacy_search(monkeypatch):
+    monkeypatch.setattr(config, "LEGACY_METADATA_SEARCH", True)
+
+
 @pytest.mark.parametrize("channel", ["semantic", "keyword"])
 def test_source_filter_precedes_candidate_limit(data_env, monkeypatch, channel):
     store = RagStore("source-filter")

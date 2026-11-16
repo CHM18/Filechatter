@@ -36,12 +36,16 @@ def main() -> int:
     parser.add_argument("-o", "--output", type=Path, help="Write UTF-8 JSON to a file")
     parser.add_argument("--server", default="http://localhost:8000", help="Filechatter server URL")
     parser.add_argument("--source", help="Restrict the search to an indexed path or filename")
+    parser.add_argument("--capture-year", type=int, help="Require an EXIF capture year")
     args = parser.parse_args()
 
+    payload = {"question": args.question, "collection_name": args.collection, "source": args.source}
+    if args.capture_year is not None:
+        payload["capture_year"] = args.capture_year
     try:
         response = requests.post(
             f"{args.server.rstrip('/')}/search/debug",
-            json={"question": args.question, "collection_name": args.collection, "source": args.source},
+            json=payload,
             timeout=120,
         )
         response.raise_for_status()

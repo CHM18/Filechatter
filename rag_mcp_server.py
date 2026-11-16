@@ -108,11 +108,13 @@ def _call(tool_name: str, arguments: dict[str, Any], timeout: int = DEFAULT_TIME
     return payload.get("result", payload)
 
 
-def search_documents(query: str, collection_name: str = "all", source: str | None = None) -> Any:
+def search_documents(
+    query: str, collection_name: str = "all", source: str | None = None, capture_year: int | None = None
+) -> Any:
     """Search the local RAG index and return the most relevant chunks."""
     return _call(
         "search_documents",
-        {"query": query, "collection_name": collection_name, "source": source},
+        {"query": query, "collection_name": collection_name, "source": source, "capture_year": capture_year},
     )
 
 

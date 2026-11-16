@@ -91,13 +91,18 @@ def execute(name: str, arguments: dict[str, Any] | None = None) -> Any:
 
 
 def search_documents(
-    query: str, collection_name: str = "all", source: str | None = None
+    query: str, collection_name: str = "all", source: str | None = None, capture_year: int | None = None
 ) -> list[dict[str, Any]]:
+    if capture_year is not None and not 1 <= capture_year <= 9999:
+        raise ValueError("capture_year must be between 1 and 9999")
     manager = runtime.collections()
     results = [
         result
         for store in manager.selected_stores(collection_name)
-        for result in store.search(query, source=source)
+        for result in (
+            store.search(query, source=source) if capture_year is None
+            else store.search(query, source=source, capture_year=capture_year)
+        )
     ]
     results.sort(key=lambda result: (-result.score, result.collection_name, result.source, result.chunk_id))
     return [
@@ -517,6 +522,10 @@ _register(
             "properties": {
                 "query": {"type": "string", "description": "Search query."},
                 "collection_name": _COLLECTION_PARAM,
+                "capture_year": {
+                    "type": "integer", "minimum": 1, "maximum": 9999,
+                    "description": "Optional strict EXIF capture-year filter; excludes missing capture dates.",
+                },
                 "source": {
                     "type": "string",
                     "description": "Optional indexed source path or file name to restrict search to.",

@@ -103,13 +103,16 @@ async def no_cache_ui_assets(request, call_next):
 
 
 def _search_results(
-    question: str, collection_name: str, source: str | None = None
+    question: str, collection_name: str, source: str | None = None, capture_year: int | None = None
 ) -> list[SearchResult]:
     manager = runtime.collections()
     results = [
         result
         for store in manager.selected_stores(collection_name)
-        for result in store.search(question, source=source)
+        for result in (
+            store.search(question, source=source) if capture_year is None
+            else store.search(question, source=source, capture_year=capture_year)
+        )
     ]
     return sorted(results, key=lambda result: (-result.score, result.collection_name, result.source, result.chunk_id))
 
@@ -160,6 +163,7 @@ class QueryRequest(BaseModel):
     include_context: bool = True
     collection_name: str = "all"
     source: str | None = None
+    capture_year: int | None = Field(default=None, ge=1, le=9999)
 
 
 class DocumentUpload(BaseModel):
@@ -215,6 +219,7 @@ class CollectionCreateRequest(BaseModel):
     keyword_weight: float = 2.0
     metadata_weight: float = 4.0
     ocr_enabled: bool = False
+    unified_search: bool | None = None
 
 
 class CollectionUpdateRequest(BaseModel):
@@ -225,6 +230,7 @@ class CollectionUpdateRequest(BaseModel):
     semantic_weight: float | None = None
     keyword_weight: float | None = None
     metadata_weight: float | None = None
+    unified_search: bool | None = None
     ocr_enabled: bool | None = None
 
 
@@ -322,6 +328,8 @@ async def list_collections():
 
 @app.post("/collections", status_code=201)
 async def create_collection(request: CollectionCreateRequest):
+    if request.unified_search is not None:
+        raise HTTPException(status_code=400, detail="unified_search is global; configure LEGACY_METADATA_SEARCH on the server.")
     manager = runtime.collections()
     try:
         entry = manager.create(
@@ -342,6 +350,8 @@ async def create_collection(request: CollectionCreateRequest):
 
 @app.patch("/collections/{name}")
 async def update_collection(name: str, request: CollectionUpdateRequest):
+    if request.unified_search is not None:
+        raise HTTPException(status_code=400, detail="unified_search is global; configure LEGACY_METADATA_SEARCH on the server.")
     manager = runtime.collections()
     try:
         manager.update_entry(
@@ -700,7 +710,7 @@ async def chat_cancel(request: ChatCancelRequest):
 async def search(request: QueryRequest):
     """Retrieve relevant chunks without invoking the LLM."""
     results = (
-        _search_results(request.question, request.collection_name, request.source)
+        _search_results(request.question, request.collection_name, request.source, request.capture_year)
         if request.include_context else []
     )
     return SearchResponse(
@@ -727,7 +737,7 @@ async def search_debug(request: QueryRequest):
     results: list[SearchResult] = []
     collections: list[dict[str, Any]] = []
     for store in manager.selected_stores(collection_name):
-        store_results, debug = store.search_debug(request.question, source=request.source)
+        store_results, debug = store.search_debug(request.question, source=request.source, capture_year=request.capture_year)
         results.extend(store_results)
         collections.append(debug)
     results.sort(key=lambda result: (-result.score, result.collection_name, result.source, result.chunk_id))
@@ -742,7 +752,7 @@ async def search_debug(request: QueryRequest):
 
 def _run_grounded_chat(request: QueryRequest) -> tuple[str, str, dict[str, Any], list[SearchResult]]:
     retrieved_results = (
-        _search_results(request.question, request.collection_name, request.source)
+        _search_results(request.question, request.collection_name, request.source, request.capture_year)
         if request.include_context else []
     )
     retrieved_documents = [

@@ -371,6 +371,22 @@ The script calls the server and writes UTF-8 JSON, overwriting an existing outpu
 
 `results` contains the normal search response with `semantic_rank`, `keyword_rank` (chunk text), and `path_rank` (the metadata-weighted path channel) added to each result. `collections` contains the effective weights and limits and all candidates from the same search, including candidates excluded by the context or per-source limits. Each candidate also has the three channel ranks, `combined_score`, `combined_rank`, and `selection`. A null channel rank means the chunk was not in that candidate list, not necessarily that it could not match outside the configured candidate limits. Ranks and context limits apply independently per collection; the normal results are then sorted across collections by score. The diagnostic does not change search ranking and includes indexed content and metadata, which may be sensitive.
 
+#### Unified keyword search and capture-year filtering
+
+Unified keyword search is the global default for all databases. The Keyword weight applies to a single full-text index containing chunk text, normalized path terms, and selected image descriptions, keywords and EXIF metadata; the old metadata/path weight is ignored. Set `LEGACY_METADATA_SEARCH=true` in `.env` and restart the server to restore the previous separate content-keyword and metadata/path searches globally. Set it to `false` or remove it to return to unified search. This switch replaces unified search; it does not add a second path channel to it. Legacy mode uses each collection's previously saved metadata weight, which remains accessible through the collection API; the metadata slider is not shown. Old per-collection `unified_search` settings are ignored.
+
+Path normalization separates letters and digits, so `Ostern2012` is searchable as `Ostern` and `2012`. Valid unambiguous day/month dates in paths also contribute the date and German month name; ambiguous dates such as `03-04-2012` are not interpreted as dates. Path-derived values are search hints, not EXIF capture dates. On the first server startup after upgrading, the additional keyword index is built from stored chunks; existing photos do **not** need vision re-analysis.
+
+In unified mode, a query containing exactly one four-digit year from 1900 to 2099 doubles the combined score of candidates with that year. The EXIF capture year takes precedence over a conflicting path year; if EXIF is absent, a single unambiguous path year is used. This is a preference, not a filter: candidates from other years or without dates can still appear. The debug output includes `preferred_year` and `preferred_year_match`. The boost applies only to candidates retrieved by the configured candidate limits.
+
+To strictly filter by EXIF capture year, use `capture_year` in `/search`, `/search/debug`, `/chat`, or the `search_documents` tool. Missing capture dates are excluded, even when a path contains the year. For the diagnostic script:
+
+```powershell
+.\.venv_filechatter\Scripts\python.exe tests\manual_search.py "ostern 2012 schnee" fotos2 --capture-year 2012 -o suchergebnis.json
+```
+
+In unified mode `keyword_rank` includes path and selected metadata matches, and `path_rank` is null. `semantic_rank` remains separate. These ranks describe candidates, not a guarantee that every matching document was retrieved.
+
 #### Clear all documents:
 ```bash
 # On Windows
@@ -687,3 +703,4 @@ Contributions welcome! Feel free to submit issues and pull requests.
 - add the possibility to configure cron-jobs for ingestion runs per collection
 - Multi-user access to server: add MCP client authentication and/or identity. Therefore the fine grain access control to the RAG needs to be made configurable per user.
 - EXIF extraction improvements: burst grouping, duplicate detection and an "edited" filter. We only store image_capture_time and the keywords. Additonal feature: a search or tool on top of them. Further Sub-seconds (SubsecTimeOriginal) is used for ordering only; there's no burst keyword. 
+- Special ranking per keyword /keyword-group and weighting per collection cathegory, e.g. fotos with different semantic, keyword weights with extra weight on dates but documents with weight on semantic content and disregarding file-creation dates.

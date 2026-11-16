@@ -50,6 +50,47 @@ def _extract_terms(text: str) -> list[str]:
     return terms
 
 
+_PATH_DATE = re.compile(r"(?<!\d)(\d{1,2})[-.](\d{1,2})[-.](\d{4})(?!\d)")
+_MONTHS = ("", "Januar", "Februar", "März", "April", "Mai", "Juni",
+           "Juli", "August", "September", "Oktober", "November", "Dezember")
+
+
+def _path_search_text(source: str) -> str:
+    parts = re.sub(r"(?<=[^\W\d_])(?=\d)|(?<=\d)(?=[^\W\d_])", " ", source)
+    extra: list[str] = []
+    for match in _PATH_DATE.finditer(source):
+        first, second, year = map(int, match.groups())
+        if first == second or (first > 12 and second <= 12):
+            day, month = first, second
+        elif second > 12 and first <= 12:
+            day, month = second, first
+        else:
+            continue
+        try:
+            date = datetime(year, month, day)
+        except ValueError:
+            continue
+        extra.extend((date.strftime("%Y-%m-%d"), _MONTHS[month]))
+    return parts + " " + " ".join(extra)
+
+
+def _search_metadata(metadata: dict[str, Any]) -> str:
+    fields = ("image_summary", "image_headline", "image_description", "image_title",
+              "image_keywords", "image_user_keywords", "image_exif_keywords", "image_people", "image_exif")
+    return " ".join(json.dumps(metadata[key], ensure_ascii=False) for key in fields if key in metadata)
+
+
+def _preferred_year(source: str, metadata: dict[str, Any]) -> int | None:
+    capture = metadata.get("image_capture_time")
+    if not capture and isinstance(metadata.get("image_exif"), dict):
+        capture = metadata["image_exif"].get("DateTimeOriginal")
+    match = re.match(r"^(\d{4})[-:]", str(capture or ""))
+    if match:
+        return int(match.group(1))
+    years = re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", source)
+    return int(years[0]) if len(set(years)) == 1 else None
+
+
 def _parse_timestamp(value: Any) -> float | None:
     if value is None:
         return None
@@ -196,6 +237,9 @@ class RagStore:
                 """
             )
             self._connection.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_unified_fts USING fts5(search_text, tokenize='unicode61')"
+            )
+            self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS documents (
                     source TEXT PRIMARY KEY,
@@ -215,6 +259,21 @@ class RagStore:
             )
             self._connection.commit()
             self._sync_fts_index()
+            self._sync_unified_index()
+
+    def _sync_unified_index(self) -> None:
+        count = self._connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        indexed = self._connection.execute("SELECT COUNT(*) FROM chunks_unified_fts").fetchone()[0]
+        if count == indexed:
+            return
+        rows = self._connection.execute("SELECT id, source, content, metadata_json FROM chunks").fetchall()
+        self._connection.execute("DELETE FROM chunks_unified_fts")
+        self._connection.executemany(
+            "INSERT INTO chunks_unified_fts(rowid, search_text) VALUES (?, ?)",
+            [(row["id"], " ".join((row["content"], _path_search_text(row["source"]),
+                                   _search_metadata(json.loads(row["metadata_json"]))))) for row in rows],
+        )
+        self._connection.commit()
 
     def _sync_fts_index(self) -> None:
         with self._lock:
@@ -348,6 +407,10 @@ class RagStore:
             (source,),
         )
         self._connection.execute(
+            "DELETE FROM chunks_unified_fts WHERE rowid IN (SELECT id FROM chunks WHERE source = ?)",
+            (source,),
+        )
+        self._connection.execute(
             "DELETE FROM chunks WHERE source = ?",
             (source,),
         )
@@ -409,15 +472,20 @@ class RagStore:
             [source, source],
         )
 
-    def _semantic_candidates(self, question: str, source: str | None = None) -> list[int]:
+    def _semantic_candidates(
+        self, question: str, source: str | None = None, allowed_ids: set[int] | None = None
+    ) -> list[int]:
         search_index = self.index
         row_ids = self._row_ids
-        if source is not None:
-            condition, params = self._source_filter(source)
-            rows = self._connection.execute(
-                f"SELECT id FROM chunks WHERE {condition}", params
-            ).fetchall()
-            allowed_ids = {row["id"] for row in rows}
+        if source is not None or allowed_ids is not None:
+            if source is not None:
+                condition, params = self._source_filter(source)
+                rows = self._connection.execute(
+                    f"SELECT id FROM chunks WHERE {condition}", params
+                ).fetchall()
+                source_ids = {row["id"] for row in rows}
+                allowed_ids = source_ids if allowed_ids is None else allowed_ids & source_ids
+            assert allowed_ids is not None
             positions = [position for position, chunk_id in enumerate(row_ids) if chunk_id in allowed_ids]
             if not positions:
                 return []
@@ -439,7 +507,38 @@ class RagStore:
             candidates.append(row_ids[faiss_index])
         return candidates
 
-    def _keyword_candidates(self, question: str, source: str | None = None) -> tuple[list[int], list[int]]:
+    def _unified_candidates(
+        self, question: str, source: str | None, allowed_ids: set[int] | None
+    ) -> list[int]:
+        terms = _extract_terms(question)
+        if not terms:
+            return []
+        rows = self._connection.execute(
+            "SELECT rowid FROM chunks_unified_fts WHERE chunks_unified_fts MATCH ? "
+            "ORDER BY bm25(chunks_unified_fts), rowid",
+            (" OR ".join(f'"{term}"' for term in terms),),
+        )
+        source_ids: set[int] | None = None
+        if source is not None:
+            condition, params = self._source_filter(source)
+            source_ids = {row["id"] for row in self._connection.execute(
+                f"SELECT id FROM chunks WHERE {condition}", params
+            )}
+        results = []
+        for row in rows:
+            chunk_id = row["rowid"]
+            if allowed_ids is not None and chunk_id not in allowed_ids:
+                continue
+            if source_ids is not None and chunk_id not in source_ids:
+                continue
+            results.append(chunk_id)
+            if len(results) >= config.KEYWORD_RETRIEVAL_K:
+                break
+        return results
+
+    def _keyword_candidates(
+        self, question: str, source: str | None = None, allowed_ids: set[int] | None = None
+    ) -> tuple[list[int], list[int]]:
         """Return body-text and source-path candidates separately.
 
         The source path contains filename and directory metadata, which is a
@@ -450,6 +549,7 @@ class RagStore:
         source_candidates: list[int] = []
         source_filter = ""
         source_params: list[str] = []
+        limit = config.KEYWORD_RETRIEVAL_K if allowed_ids is None else -1
         if source is not None:
             condition, source_params = self._source_filter(source)
             source_filter = f" AND {condition}"
@@ -465,9 +565,10 @@ class RagStore:
                 ORDER BY bm25(chunks_fts)
                 LIMIT ?
                 """,
-                (match_query, *source_params, config.KEYWORD_RETRIEVAL_K),
+                (match_query, *source_params, limit),
             ).fetchall()
-            content_candidates.extend(row["rowid"] for row in content_rows)
+            content_candidates.extend([row["rowid"] for row in content_rows
+                                       if allowed_ids is None or row["rowid"] in allowed_ids][:config.KEYWORD_RETRIEVAL_K])
             source_rows = self._connection.execute(
                 f"""
                 SELECT rowid
@@ -477,9 +578,10 @@ class RagStore:
                 ORDER BY bm25(chunks_fts)
                 LIMIT ?
                 """,
-                (match_query, *source_params, config.KEYWORD_RETRIEVAL_K),
+                (match_query, *source_params, limit),
             ).fetchall()
-            source_candidates.extend(row["rowid"] for row in source_rows)
+            source_candidates.extend([row["rowid"] for row in source_rows
+                                      if allowed_ids is None or row["rowid"] in allowed_ids][:config.KEYWORD_RETRIEVAL_K])
 
         phrase = question.strip()
         if phrase:
@@ -492,9 +594,10 @@ class RagStore:
                 ORDER BY source ASC, chunk_index ASC
                 LIMIT ?
                 """,
-                (f"%{phrase}%", *source_params, config.KEYWORD_RETRIEVAL_K),
+                (f"%{phrase}%", *source_params, limit),
             ).fetchall()
-            content_candidates.extend(row["id"] for row in content_rows)
+            content_candidates.extend([row["id"] for row in content_rows
+                                       if allowed_ids is None or row["id"] in allowed_ids][:config.KEYWORD_RETRIEVAL_K])
             source_rows = self._connection.execute(
                 f"""
                 SELECT id
@@ -504,9 +607,10 @@ class RagStore:
                 ORDER BY source ASC, chunk_index ASC
                 LIMIT ?
                 """,
-                (f"%{phrase}%", *source_params, config.KEYWORD_RETRIEVAL_K),
+                (f"%{phrase}%", *source_params, limit),
             ).fetchall()
-            source_candidates.extend(row["id"] for row in source_rows)
+            source_candidates.extend([row["id"] for row in source_rows
+                                      if allowed_ids is None or row["id"] in allowed_ids][:config.KEYWORD_RETRIEVAL_K])
 
         def dedupe(candidates: list[int]) -> list[int]:
             deduped: list[int] = []
@@ -743,6 +847,14 @@ class RagStore:
                         for inserted_id, row in zip(inserted_ids, pending_rows)
                     ],
                 )
+                self._connection.executemany(
+                    "INSERT INTO chunks_unified_fts(rowid, search_text) VALUES (?, ?)",
+                    [
+                        (inserted_id, " ".join((row[1], _path_search_text(row[0]),
+                                                _search_metadata(json.loads(row[2])))))
+                        for inserted_id, row in zip(inserted_ids, pending_rows)
+                    ],
+                )
             for source, (metadata, changed_ts, ingested_at) in source_updates.items():
                 self._upsert_document_record(source, metadata, changed_ts, ingested_at)
 
@@ -766,29 +878,33 @@ class RagStore:
                 "deleted_chunks": deleted_chunks,
             }
 
-    def search(self, question: str, source: str | None = None) -> list[SearchResult]:
-        return self._search(question, source)
+    def search(self, question: str, source: str | None = None, capture_year: int | None = None) -> list[SearchResult]:
+        return self._search(question, source, capture_year=capture_year)
 
-    def search_debug(self, question: str, source: str | None = None) -> tuple[list[SearchResult], dict[str, Any]]:
+    def search_debug(self, question: str, source: str | None = None, capture_year: int | None = None) -> tuple[list[SearchResult], dict[str, Any]]:
         """Run the normal search and collect its per-channel candidate ranks."""
         debug: dict[str, Any] = {}
-        results = self._search(question, source, debug)
+        results = self._search(question, source, debug, capture_year)
         return results, debug
 
     def _search(
-        self, question: str, source: str | None, debug: dict[str, Any] | None = None
+        self, question: str, source: str | None, debug: dict[str, Any] | None = None,
+        capture_year: int | None = None,
     ) -> list[SearchResult]:
         with self._lock:
+            unified_search = not config.LEGACY_METADATA_SEARCH
             if source is not None:
                 self._source_filter(source)
             normalized_question = _normalize_text(question)
             if debug is not None:
                 debug.update({
                     "collection_name": self.collection_name,
+                    "unified_search": unified_search,
+                    "capture_year_filter": capture_year,
                     "weights": {
                         "semantic": self.semantic_weight,
                         "keyword": self.keyword_weight,
-                        "path": self.metadata_weight,
+                        "path": 0.0 if unified_search else self.metadata_weight,
                     },
                     "limits": {
                         "semantic_candidates": config.RETRIEVAL_K,
@@ -803,23 +919,49 @@ class RagStore:
                 return []
             if not normalized_question or self.chunk_count == 0:
                 return []
-            if all(weight <= 0 for weight in (self.semantic_weight, self.keyword_weight, self.metadata_weight)):
+            active_weights = (self.semantic_weight, self.keyword_weight) if unified_search else (
+                self.semantic_weight, self.keyword_weight, self.metadata_weight
+            )
+            if all(weight <= 0 for weight in active_weights):
                 return []
+
+            allowed_ids: set[int] | None = None
+            if capture_year is not None:
+                if not 1 <= capture_year <= 9999:
+                    raise ValueError("capture_year must be between 1 and 9999")
+                allowed_ids = set()
+                for row in self._connection.execute("SELECT id, metadata_json FROM chunks"):
+                    metadata = json.loads(row["metadata_json"])
+                    capture = metadata.get("image_capture_time")
+                    if not capture and isinstance(metadata.get("image_exif"), dict):
+                        capture = metadata["image_exif"].get("DateTimeOriginal")
+                    if re.match(rf"^{capture_year:04d}[-:]", str(capture or "")):
+                        allowed_ids.add(row["id"])
 
             semantic_candidates: list[int] = []
             keyword_candidates: list[int] = []
             metadata_candidates: list[int] = []
 
             if self.semantic_weight > 0:
-                semantic_candidates = (
-                    self._semantic_candidates(normalized_question)
-                    if source is None else self._semantic_candidates(normalized_question, source=source)
-                )
-            if self.keyword_weight > 0 or self.metadata_weight > 0:
-                keyword_candidates, metadata_candidates = (
-                    self._keyword_candidates(normalized_question)
-                    if source is None else self._keyword_candidates(normalized_question, source=source)
-                )
+                if allowed_ids is not None:
+                    semantic_candidates = self._semantic_candidates(normalized_question, source, allowed_ids)
+                else:
+                    semantic_candidates = (
+                        self._semantic_candidates(normalized_question)
+                        if source is None else self._semantic_candidates(normalized_question, source=source)
+                    )
+            if unified_search and self.keyword_weight > 0:
+                keyword_candidates = self._unified_candidates(normalized_question, source, allowed_ids)
+            elif not unified_search and (self.keyword_weight > 0 or self.metadata_weight > 0):
+                if allowed_ids is not None:
+                    keyword_candidates, metadata_candidates = self._keyword_candidates(
+                        normalized_question, source=source, allowed_ids=allowed_ids
+                    )
+                else:
+                    keyword_candidates, metadata_candidates = (
+                        self._keyword_candidates(normalized_question)
+                        if source is None else self._keyword_candidates(normalized_question, source=source)
+                    )
                 if source is not None:
                     metadata_candidates = []
 
@@ -841,6 +983,17 @@ class RagStore:
                     self.metadata_weight / (reciprocal_rank_offset + rank)
                 )
 
+            years = set(re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", normalized_question))
+            preferred_year = int(next(iter(years))) if unified_search and len(years) == 1 else None
+            if debug is not None:
+                debug["preferred_year"] = preferred_year
+            if preferred_year is not None:
+                for chunk_id in combined_scores:
+                    row = self._connection.execute(
+                        "SELECT source, metadata_json FROM chunks WHERE id = ?", (chunk_id,)
+                    ).fetchone()
+                    if row and _preferred_year(row["source"], json.loads(row["metadata_json"])) == preferred_year:
+                        combined_scores[chunk_id] *= 2
             ordered_chunk_ids = [
                 chunk_id
                 for chunk_id, _ in sorted(
@@ -874,6 +1027,10 @@ class RagStore:
                         "path_rank": ranks["path"],
                         "combined_score": combined_scores[chunk_id],
                         "combined_rank": rank,
+                        "preferred_year_match": (
+                            _preferred_year(row["source"], json.loads(row["metadata_json"])) == preferred_year
+                            if row is not None and preferred_year is not None else None
+                        ),
                         "selection": "not_evaluated_context_budget",
                     }
                     debug_candidates[chunk_id] = candidate
@@ -1016,6 +1173,7 @@ class RagStore:
         with self._lock:
             self._connection.execute("DELETE FROM chunks")
             self._connection.execute("DELETE FROM chunks_fts")
+            self._connection.execute("DELETE FROM chunks_unified_fts")
             self._connection.execute("DELETE FROM documents")
             self._connection.commit()
             self.index = faiss.IndexFlatIP(self.dimension)
